@@ -33,24 +33,30 @@ class GastoListCreateView(generics.ListCreateAPIView):
     def get_permissions(self):
         if self.request.method == 'POST':
             return [IsAuthenticated()]
-        return [EsAdminSupervisorOCajero()]  # ✅ cajero ahora puede ver la lista
+        return [EsAdminSupervisorOCajero()]
 
     def get_queryset(self):
+        from django.utils import timezone
+
         qs   = Gasto.objects.select_related("tienda", "empleado", "sesion_caja")
         user = self.request.user
 
-        # Cajero solo ve gastos de su tienda
+        # ✅ Fecha del query param o hoy por defecto
+        fecha = self.request.query_params.get("fecha") or str(timezone.now().date())
+
+        # Cajero: solo ve su tienda + filtro por fecha
         if user.rol == 'cajero':
             return qs.filter(
-                tienda_id=user.tienda_id
+                tienda_id=user.tienda_id,
+                created_at__date=fecha,     # ✅ FIX: antes ignoraba la fecha
             ).order_by("-created_at")
 
         # Admin/Supervisor con filtros opcionales
         tienda_id = self.request.query_params.get("tienda_id")
-        fecha     = self.request.query_params.get("fecha")
         categoria = self.request.query_params.get("categoria")
+
+        qs = qs.filter(created_at__date=fecha)  # ✅ siempre filtra por fecha
         if tienda_id: qs = qs.filter(tienda_id=tienda_id)
-        if fecha:     qs = qs.filter(created_at__date=fecha)
         if categoria: qs = qs.filter(categoria=categoria)
         return qs.order_by("-created_at")
 
@@ -60,7 +66,6 @@ class GastoListCreateView(generics.ListCreateAPIView):
             tienda_id=tienda_id, estado="abierta"
         ).first()
         serializer.save(empleado=self.request.user, sesion_caja=sesion)
-
 
 class GastoDetailView(generics.RetrieveDestroyAPIView):
     queryset           = Gasto.objects.all()

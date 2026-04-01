@@ -84,13 +84,24 @@ class CrearVentaView(APIView):
 
 class VentaListView(generics.ListAPIView):
     serializer_class   = VentaSerializer
-    permission_classes = [IsAuthenticated]  # ← ya no bloquea cajero
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs        = Venta.objects.select_related(
+        qs = Venta.objects.select_related(
             "cliente", "empleado", "tienda", "sesion_caja"
         ).prefetch_related("detalles")
 
+        user = self.request.user
+
+        # ✅ Cajero: forzar su tienda en backend, ignora query params de tienda
+        if user.rol == "cajero":
+            qs = qs.filter(tienda_id=user.tienda_id)  # ← forzado, no del query param
+            fecha = self.request.query_params.get("fecha")
+            if fecha:
+                qs = qs.filter(created_at__date=fecha)
+            return qs.order_by("-created_at")
+
+        # Admin / Supervisor — filtros opcionales
         tienda_id = self.request.query_params.get("tienda_id")
         sesion_id = self.request.query_params.get("sesion_id")
         fecha     = self.request.query_params.get("fecha")
@@ -100,10 +111,6 @@ class VentaListView(generics.ListAPIView):
         if sesion_id: qs = qs.filter(sesion_caja_id=sesion_id)
         if fecha:     qs = qs.filter(created_at__date=fecha)
         if cliente:   qs = qs.filter(cliente_id=cliente)
-
-        # Cajero solo ve sus propias ventas
-        if self.request.user.rol == "cajero":
-            qs = qs.filter(empleado=self.request.user)
 
         return qs.order_by("-created_at")
 

@@ -40,21 +40,23 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
-        token["nombre"]    = user.nombre
-        token["apellido"]  = user.apellido
-        token["rol"]       = user.rol
-        token["tienda_id"] = user.tienda_id
+        token["nombre"]        = user.nombre
+        token["apellido"]      = user.apellido
+        token["rol"]           = user.rol
+        token["tienda_id"]     = user.tienda_id
+        token["tienda_nombre"] = user.tienda.nombre if user.tienda else "" # ✅ NUEVO
         return token
 
     def validate(self, attrs):
-        data = super().validate(attrs)
+        data     = super().validate(attrs)
         empleado = self.user
         data["empleado"] = {
-            "id":        empleado.id,
-            "nombre":    empleado.nombre,
-            "apellido":  empleado.apellido,
-            "email":     empleado.email,
-            "rol":       empleado.rol,
-            "tienda_id": empleado.tienda_id,
+            "id":            empleado.id,
+            "nombre":        empleado.nombre,
+            "apellido":      empleado.apellido,
+            "email":         empleado.email,
+            "rol":           empleado.rol,
+            "tienda_id":     empleado.tienda_id,
+            "tienda_nombre": empleado.tienda.nombre if empleado.tienda else "", # ✅ NUEVO
         }
         return data

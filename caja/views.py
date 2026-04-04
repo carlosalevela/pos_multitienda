@@ -5,9 +5,11 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.utils import timezone
 from django.db.models import Sum
+from django.db import transaction
 
-from .models import SesionCaja
+from .models import SesionCaja, MovimientoCaja
 from .serializers import SesionCajaSerializer, AbrirCajaSerializer, CerrarCajaSerializer
+from clientes.models import Separado, AbonoSeparado
 
 
 class EsAdminOSupervisor(IsAuthenticated):
@@ -96,7 +98,14 @@ class CerrarCajaView(APIView):
             sesion_caja=sesion, metodo_pago="efectivo"
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        monto_sistema = sesion.monto_inicial + total_ventas - total_gastos
+        # ✅ NUEVO — abonos en efectivo de separados durante esta sesión
+        total_abonos = sesion.movimientos.filter(
+            tipo        = "abono_separado",
+            metodo_pago = "efectivo",
+        ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        # ✅ monto_sistema ahora incluye abonos
+        monto_sistema = sesion.monto_inicial + total_ventas + total_abonos - total_gastos
         diferencia    = monto_real - monto_sistema
 
         sesion.monto_final_sistema = monto_sistema
@@ -113,6 +122,7 @@ class CerrarCajaView(APIView):
             "monto_inicial":       float(sesion.monto_inicial),
             "total_ventas":        float(total_ventas),
             "total_gastos":        float(total_gastos),
+            "total_abonos":        float(total_abonos),  # ✅ NUEVO
             "monto_final_sistema": float(monto_sistema),
             "monto_final_real":    float(monto_real),
             "diferencia":          float(diferencia),
@@ -120,7 +130,6 @@ class CerrarCajaView(APIView):
                                    else f"⚠️ Faltante ${abs(diferencia)}" if diferencia < 0
                                    else f"💰 Sobrante ${diferencia}",
         })
-
 
 # ── Sesión activa de una tienda ───────────────────────────────
 class SesionActivaView(APIView):
@@ -157,7 +166,7 @@ class SesionCajaDetailView(generics.RetrieveAPIView):
     serializer_class   = SesionCajaSerializer
     permission_classes = [IsAuthenticated]
 
-# ── Resumen pre-cierre ────────────────────────────────
+# ── Resumen pre-cierre ────────────────────────────────────────
 class ResumenCierreView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -172,8 +181,8 @@ class ResumenCierreView(APIView):
             return Response(
                 {"error": "Sesión no encontrada o ya cerrada."}, status=404)
 
-        def agg(qs): return qs.aggregate(t=Sum('monto'))['t'] or Decimal('0')
-        def vsum(qs): return qs.aggregate(t=Sum('total'))['t'] or Decimal('0')
+        def agg(qs):  return qs.aggregate(t=Sum('monto'))['t']  or Decimal('0')
+        def vsum(qs): return qs.aggregate(t=Sum('total'))['t']  or Decimal('0')
 
         base_v = Venta.objects.filter(sesion_caja=sesion, estado='completada')
         base_g = Gasto.objects.filter(sesion_caja=sesion)
@@ -188,14 +197,27 @@ class ResumenCierreView(APIView):
         g_efectivo = agg(base_g.filter(metodo_pago='efectivo'))
         g_otros    = agg(base_g.exclude(metodo_pago='efectivo'))
         total_g    = g_efectivo + g_otros
-
         detalle_gastos = list(base_g.values('categoria', 'monto', 'metodo_pago'))
 
-        monto_esperado = sesion.monto_inicial + v_efectivo + v_mixto - g_efectivo
+        # ✅ NUEVO — abonos separados desde MovimientoCaja
+        base_a          = sesion.movimientos.filter(tipo='abono_separado')
+        a_efectivo      = agg(base_a.filter(metodo_pago='efectivo'))
+        a_transferencia = agg(base_a.filter(metodo_pago='transferencia'))
+        a_tarjeta       = agg(base_a.filter(metodo_pago='tarjeta'))
+        total_abonos    = a_efectivo + a_transferencia + a_tarjeta
+        num_abonos      = base_a.count()
 
-        nombre = ''
-        if sesion.empleado:
-            nombre = f"{sesion.empleado.nombre} {sesion.empleado.apellido}"
+        # ✅ monto_esperado ahora incluye abonos en efectivo
+        monto_esperado = (
+            sesion.monto_inicial
+            + v_efectivo
+            + v_mixto
+            + a_efectivo      # ✅ NUEVO
+            - g_efectivo
+        )
+
+        nombre = f"{sesion.empleado.nombre} {sesion.empleado.apellido}" \
+                 if sesion.empleado else ''
 
         return Response({
             'sesion_id':       sesion.id,
@@ -216,6 +238,14 @@ class ResumenCierreView(APIView):
                 'otros':    float(g_otros),
                 'total':    float(total_g),
                 'detalle':  detalle_gastos,
+            },
+            # ✅ NUEVO — sección completa de abonos
+            'abonos_separados': {
+                'efectivo':      float(a_efectivo),
+                'transferencia': float(a_transferencia),
+                'tarjeta':       float(a_tarjeta),
+                'total':         float(total_abonos),
+                'cantidad':      num_abonos,
             },
             'monto_esperado_caja': float(monto_esperado),
         })

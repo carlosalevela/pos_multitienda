@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Q, F
 from decimal import Decimal
+from django.db.models import Sum
 
 from .models import Categoria, Producto, Inventario, MovimientoInventario
 from .serializers import (
@@ -272,3 +273,59 @@ class MovimientosProductoView(generics.ListAPIView):
             producto_id = self.kwargs["producto_id"],
             tienda_id   = self.kwargs["tienda_id"]
         ).select_related("producto", "empleado").order_by("-created_at")
+    
+class TopProductosView(APIView):
+    """
+    GET /productos/top-productos/
+    Params: tienda_id, fecha_ini, fecha_fin, limite (default 20)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # ✅ Import local evita circular import (ventas ↔ productos)
+        from ventas.models import DetalleVenta
+
+        tienda_id = request.query_params.get('tienda_id')
+        fecha_ini = request.query_params.get('fecha_ini')
+        fecha_fin = request.query_params.get('fecha_fin')
+        limite    = int(request.query_params.get('limite', 20))
+
+        # ✅ Solo ventas completadas (no anuladas)
+        qs = DetalleVenta.objects.filter(venta__estado='completada')
+
+        # ── Restricción por rol ────────────────────────
+        if request.user.rol == 'cajero':
+            qs = qs.filter(venta__tienda_id=request.user.tienda_id)
+        elif tienda_id:
+            qs = qs.filter(venta__tienda_id=tienda_id)
+
+        # ── Filtros de fecha ───────────────────────────
+        if fecha_ini:
+            qs = qs.filter(venta__created_at__date__gte=fecha_ini)
+        if fecha_fin:
+            qs = qs.filter(venta__created_at__date__lte=fecha_fin)
+
+        # ── Agrupación ─────────────────────────────────
+        resultado = (
+            qs
+            .values(
+                'producto__nombre',
+                'producto__categoria__nombre',   # ✅ FK Categoria
+            )
+            .annotate(
+                total_vendido  = Sum('cantidad'),   # ✅ campo confirmado
+                total_ingresos = Sum('subtotal'),   # ✅ campo confirmado
+            )
+            .order_by('-total_ingresos')[:limite]
+        )
+
+        data = [
+            {
+                'producto':       r['producto__nombre']            or 'Sin nombre',
+                'categoria':      r['producto__categoria__nombre'] or 'Sin categoría',
+                'total_vendido':  float(r['total_vendido']  or 0),
+                'total_ingresos': float(r['total_ingresos'] or 0),
+            }
+            for r in resultado
+        ]
+        return Response(data)

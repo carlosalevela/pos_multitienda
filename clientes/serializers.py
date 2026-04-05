@@ -35,10 +35,12 @@ class DetalleSeparadoSerializer(serializers.ModelSerializer):
 
 class AbonoSeparadoSerializer(serializers.ModelSerializer):
     empleado_nombre = serializers.SerializerMethodField()
+    cliente_nombre  = serializers.SerializerMethodField()  # ✅ nuevo
 
     class Meta:
         model  = AbonoSeparado
         fields = ["id", "separado", "empleado", "empleado_nombre",
+                  "cliente_nombre",                              # ✅ nuevo
                   "monto", "metodo_pago", "created_at"]
         read_only_fields = ["id", "empleado", "created_at"]
 
@@ -46,6 +48,13 @@ class AbonoSeparadoSerializer(serializers.ModelSerializer):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
+
+    # ✅ nuevo
+    def get_cliente_nombre(self, obj):
+        if obj.separado and obj.separado.cliente:
+            c = obj.separado.cliente
+            return f"{c.nombre} {c.apellido}"
+        return "—"
 
 
 class SeparadoSerializer(serializers.ModelSerializer):

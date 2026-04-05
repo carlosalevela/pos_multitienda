@@ -79,21 +79,22 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
     def get_queryset(self):
         qs = Separado.objects.select_related(
-            "cliente", "tienda", "empleado"
-        ).prefetch_related("detalles", "abonos")
+        "cliente", "tienda", "empleado"
+    ).prefetch_related("detalles", "abonos")
 
-        tienda_id = self.request.query_params.get("tienda_id")
-        estado    = self.request.query_params.get("estado")
-        cliente   = self.request.query_params.get("cliente_id")
+        tienda_id      = self.request.query_params.get("tienda_id")
+        estado         = self.request.query_params.get("estado")
+        cliente        = self.request.query_params.get("cliente_id")
+        fecha_creacion = self.request.query_params.get("fecha_creacion")  # ✅ nuevo
 
-        # ✅ Cajero solo ve los separados de su tienda
         if self.request.user.rol == "cajero":
             qs = qs.filter(tienda_id=self.request.user.tienda_id)
         elif tienda_id:
             qs = qs.filter(tienda_id=tienda_id)
 
-        if estado:  qs = qs.filter(estado=estado)
-        if cliente: qs = qs.filter(cliente_id=cliente)
+        if estado:          qs = qs.filter(estado=estado)
+        if cliente:         qs = qs.filter(cliente_id=cliente)
+        if fecha_creacion:  qs = qs.filter(created_at__date=fecha_creacion)  # ✅ nuevo
 
         return qs.order_by("-created_at")
 

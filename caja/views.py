@@ -240,7 +240,7 @@ class ResumenCierreView(APIView):
                 'detalle':  detalle_gastos,
             },
             # ✅ NUEVO — sección completa de abonos
-            'abonos_separados': {
+            'abonos': {
                 'efectivo':      float(a_efectivo),
                 'transferencia': float(a_transferencia),
                 'tarjeta':       float(a_tarjeta),

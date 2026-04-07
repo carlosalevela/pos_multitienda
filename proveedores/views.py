@@ -7,7 +7,7 @@ from django.utils import timezone
 
 from .models import Proveedor, Compra
 from .serializers import ProveedorSerializer, ProveedorSimpleSerializer, CompraSerializer
-from productos.models import Inventario, MovimientoInventario
+from productos.models import Inventario, MovimientoInventario,Producto
 
 
 class EsAdmin(IsAuthenticated):
@@ -80,7 +80,9 @@ class RecibirCompraView(APIView):
     @transaction.atomic
     def post(self, request, pk):
         try:
-            compra = Compra.objects.prefetch_related("detalles__producto").get(pk=pk)
+            compra = Compra.objects.prefetch_related(
+                "detalles__producto", "detalles__categoria"
+            ).get(pk=pk)
         except Compra.DoesNotExist:
             return Response({"error": "Compra no encontrada."}, status=404)
 
@@ -92,6 +94,21 @@ class RecibirCompraView(APIView):
         productos_actualizados = []
 
         for detalle in compra.detalles.all():
+
+            # ── Producto libre → crear automáticamente ────────
+            if not detalle.producto:
+                nuevo_producto = Producto.objects.create(
+                    nombre        = detalle.nombre_libre or "Producto sin nombre",
+                    categoria     = detalle.categoria,       # puede ser null
+                    precio_compra = detalle.precio_unitario,
+                    precio_venta  = detalle.precio_unitario,
+                    activo        = True,
+                )
+                # Vincula el detalle al nuevo producto para trazabilidad
+                detalle.producto = nuevo_producto
+                detalle.save()
+
+            # ── Actualizar inventario ─────────────────────────
             inv, _ = Inventario.objects.select_for_update().get_or_create(
                 producto = detalle.producto,
                 tienda   = compra.tienda,
@@ -113,6 +130,8 @@ class RecibirCompraView(APIView):
 
             productos_actualizados.append({
                 "producto":          detalle.producto.nombre,
+                "es_nuevo":          detalle.nombre_libre != "",
+                "categoria":         detalle.categoria.nombre if detalle.categoria else None,
                 "cantidad_recibida": float(detalle.cantidad),
                 "stock_actual":      float(inv.stock_actual),
             })

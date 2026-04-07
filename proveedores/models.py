@@ -39,10 +39,19 @@ class Compra(models.Model):
     class Meta:
         db_table = "compras"
 
-
 class DetalleCompra(models.Model):
     compra          = models.ForeignKey(Compra, on_delete=models.CASCADE, related_name="detalles")
-    producto        = models.ForeignKey("productos.Producto", on_delete=models.CASCADE)
+    producto        = models.ForeignKey(
+        "productos.Producto", on_delete=models.CASCADE,
+        null=True, blank=True,
+    )
+    nombre_libre    = models.CharField(max_length=200, blank=True, default="")
+    categoria       = models.ForeignKey(           # ← NUEVO
+        "productos.Categoria",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="detalles_compra"
+    )
     cantidad        = models.DecimalField(max_digits=12, decimal_places=2)
     precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
     subtotal        = models.DecimalField(max_digits=12, decimal_places=2)

@@ -20,17 +20,36 @@ class ProveedorSimpleSerializer(serializers.ModelSerializer):
 
 
 class DetalleCompraSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_nombre  = serializers.SerializerMethodField()
+    categoria_nombre = serializers.CharField(
+        source="categoria.nombre", read_only=True
+    )
 
     class Meta:
         model  = DetalleCompra
         fields = [
             "id", "producto", "producto_nombre",
+            "nombre_libre", "categoria", "categoria_nombre",
             "cantidad", "precio_unitario", "subtotal"
         ]
         read_only_fields = ["id", "subtotal"]
+        extra_kwargs = {
+            "producto":  {"required": False, "allow_null": True},
+            "categoria": {"required": False, "allow_null": True},
+        }
+
+    def get_producto_nombre(self, obj):
+        if obj.producto:
+            return obj.producto.nombre
+        return obj.nombre_libre or "Producto libre"
 
     def validate(self, attrs):
+        tiene_producto    = attrs.get("producto") is not None
+        tiene_nombre_libre = attrs.get("nombre_libre", "").strip()
+        if not tiene_producto and not tiene_nombre_libre:
+            raise serializers.ValidationError(
+                "Debes seleccionar un producto o escribir un nombre."
+            )
         attrs["subtotal"] = attrs["cantidad"] * attrs["precio_unitario"]
         return attrs
 
@@ -52,7 +71,7 @@ class CompraSerializer(serializers.ModelSerializer):
             "fecha_orden", "fecha_recepcion",
             "observaciones", "detalles"
         ]
-        read_only_fields = ["id", "total", "fecha_orden", "empleado"]
+        read_only_fields = ["id", "total", "fecha_orden", "empleado", "numero_orden"]
 
     def get_empleado_nombre(self, obj):
         if obj.empleado:

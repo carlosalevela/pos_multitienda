@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from .models import Proveedor, Compra, DetalleCompra
+from productos.utils import resolver_categoria  # ← agrega este import
 
 
 class ProveedorSerializer(serializers.ModelSerializer):
@@ -21,8 +22,14 @@ class ProveedorSimpleSerializer(serializers.ModelSerializer):
 
 class DetalleCompraSerializer(serializers.ModelSerializer):
     producto_nombre  = serializers.SerializerMethodField()
+
+    # ← Lee el nombre de la categoría existente (read)
     categoria_nombre = serializers.CharField(
         source="categoria.nombre", read_only=True
+    )
+    # ← Acepta el nombre para crear/buscar categoría (write)
+    categoria_nombre_input = serializers.CharField(
+        write_only=True, required=False, allow_blank=True, default=''
     )
 
     class Meta:
@@ -30,6 +37,7 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         fields = [
             "id", "producto", "producto_nombre",
             "nombre_libre", "categoria", "categoria_nombre",
+            "categoria_nombre_input",  # ← campo de entrada
             "cantidad", "precio_unitario", "subtotal"
         ]
         read_only_fields = ["id", "subtotal"]
@@ -44,7 +52,7 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         return obj.nombre_libre or "Producto libre"
 
     def validate(self, attrs):
-        tiene_producto    = attrs.get("producto") is not None
+        tiene_producto     = attrs.get("producto") is not None
         tiene_nombre_libre = attrs.get("nombre_libre", "").strip()
         if not tiene_producto and not tiene_nombre_libre:
             raise serializers.ValidationError(
@@ -52,6 +60,12 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
             )
         attrs["subtotal"] = attrs["cantidad"] * attrs["precio_unitario"]
         return attrs
+
+    def create(self, validated_data):
+        nombre_cat = validated_data.pop("categoria_nombre_input", "") or ""
+        if nombre_cat.strip():
+            validated_data["categoria"] = resolver_categoria(nombre_cat)
+        return super().create(validated_data)
 
 
 class CompraSerializer(serializers.ModelSerializer):
@@ -82,7 +96,14 @@ class CompraSerializer(serializers.ModelSerializer):
         detalles_data = validated_data.pop("detalles")
         total  = sum(d["cantidad"] * d["precio_unitario"] for d in detalles_data)
         compra = Compra.objects.create(total=total, **validated_data)
+
         for detalle in detalles_data:
+            # ✅ Extraer categoria_nombre_input ANTES de crear el objeto
+            nombre_cat = detalle.pop("categoria_nombre_input", "") or ""
+            if nombre_cat.strip() and not detalle.get("categoria"):
+                detalle["categoria"] = resolver_categoria(nombre_cat)
+
             detalle["subtotal"] = detalle["cantidad"] * detalle["precio_unitario"]
             DetalleCompra.objects.create(compra=compra, **detalle)
+
         return compra

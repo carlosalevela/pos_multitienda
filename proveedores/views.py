@@ -7,12 +7,14 @@ from django.utils import timezone
 
 from .models import Proveedor, Compra
 from .serializers import ProveedorSerializer, ProveedorSimpleSerializer, CompraSerializer
-from productos.models import Inventario, MovimientoInventario,Producto
+from productos.models import Inventario, MovimientoInventario, Producto, generar_codigo_barras_interno
+from contabilidad.models import Gasto  # ✅ NUEVO
 
 
 class EsAdmin(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) and request.user.rol == "admin"
+
 
 class EsAdminOSupervisor(IsAuthenticated):
     def has_permission(self, request, view):
@@ -31,6 +33,7 @@ class ProveedorListCreateView(generics.ListCreateAPIView):
             qs = qs.filter(nombre__icontains=q)
         return qs
 
+
 class ProveedorDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset           = Proveedor.objects.all()
     serializer_class   = ProveedorSerializer
@@ -41,6 +44,7 @@ class ProveedorDetailView(generics.RetrieveUpdateDestroyAPIView):
         proveedor.activo = False
         proveedor.save()
         return Response({"detail": f"Proveedor '{proveedor.nombre}' desactivado."})
+
 
 class ProveedorSimpleListView(generics.ListAPIView):
     queryset           = Proveedor.objects.filter(activo=True).order_by("nombre")
@@ -67,6 +71,7 @@ class CompraListCreateView(generics.ListCreateAPIView):
         ultimo = Compra.objects.order_by("-id").first()
         numero = f"OC-{(ultimo.id + 1 if ultimo else 1):05d}"
         serializer.save(empleado=self.request.user, numero_orden=numero)
+
 
 class CompraDetailView(generics.RetrieveAPIView):
     queryset           = Compra.objects.prefetch_related("detalles__producto")
@@ -99,12 +104,12 @@ class RecibirCompraView(APIView):
             if not detalle.producto:
                 nuevo_producto = Producto.objects.create(
                     nombre        = detalle.nombre_libre or "Producto sin nombre",
-                    categoria     = detalle.categoria,       # puede ser null
+                    categoria     = detalle.categoria,
                     precio_compra = detalle.precio_unitario,
                     precio_venta  = detalle.precio_unitario,
+                    codigo_barras = generar_codigo_barras_interno(),
                     activo        = True,
                 )
-                # Vincula el detalle al nuevo producto para trazabilidad
                 detalle.producto = nuevo_producto
                 detalle.save()
 
@@ -131,6 +136,7 @@ class RecibirCompraView(APIView):
             productos_actualizados.append({
                 "producto":          detalle.producto.nombre,
                 "es_nuevo":          detalle.nombre_libre != "",
+                "codigo_barras":     detalle.producto.codigo_barras,
                 "categoria":         detalle.categoria.nombre if detalle.categoria else None,
                 "cantidad_recibida": float(detalle.cantidad),
                 "stock_actual":      float(inv.stock_actual),
@@ -139,6 +145,22 @@ class RecibirCompraView(APIView):
         compra.estado          = "recibida"
         compra.fecha_recepcion = timezone.now()
         compra.save()
+
+        # ✅ Crear gasto automático solo_admin al recibir la orden
+        total_compra = sum(
+            d.cantidad * d.precio_unitario
+            for d in compra.detalles.all()
+        )
+        if total_compra > 0:
+            Gasto.objects.create(
+                tienda      = compra.tienda,
+                empleado    = request.user,
+                categoria   = 'proveedor',
+                descripcion = f'Recepción {compra.numero_orden} — {compra.proveedor.nombre}',
+                monto       = total_compra,
+                metodo_pago = 'transferencia',
+                visibilidad = 'solo_admin',   # ← cajero nunca lo ve
+            )
 
         return Response({
             "detail":    f"Compra {compra.numero_orden} recibida correctamente.",

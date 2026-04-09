@@ -66,3 +66,23 @@ class MovimientoInventario(models.Model):
 
     class Meta:
         db_table = "movimientos_inventario"
+
+def generar_codigo_barras_interno():
+    """
+    Genera el siguiente código de barras interno secuencial.
+    Formato: 10000001, 10000002, 10000003 ...
+    Solo toma en cuenta códigos que sean nuestros (numéricos que empiecen con 1000).
+    """
+    codigos = (
+        Producto.objects
+        .filter(codigo_barras__regex=r'^1\d{7,}$')  # 8+ dígitos empezando en 1
+        .values_list('codigo_barras', flat=True)
+    )
+
+    if not codigos.exists():
+        return '10000001'
+
+    max_num = max(
+        int(c) for c in codigos if c and c.isdigit()
+    )
+    return str(max_num + 1)

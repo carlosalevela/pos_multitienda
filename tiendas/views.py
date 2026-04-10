@@ -43,10 +43,11 @@ class TiendaDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class TiendaSimpleListView(generics.ListAPIView):
-    queryset           = Tienda.objects.filter(activo=True).order_by("nombre")
     serializer_class   = TiendaSimpleSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        return Tienda.objects.filter(activo=True).order_by("nombre")
 
 class EmpleadosPorTiendaView(APIView):
     permission_classes = [EsAdminOSupervisor]

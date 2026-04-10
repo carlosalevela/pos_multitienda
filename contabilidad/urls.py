@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     GastoListCreateView, GastoDetailView,
-    ResumenDiarioView, ResumenMensualView, ProductosMasVendidosView,ResumenAnualView
+    ResumenDiarioView, ResumenMensualView, ProductosMasVendidosView,ResumenAnualView,GastosResumenRangoView
 )
 
 urlpatterns = [
@@ -11,4 +11,5 @@ urlpatterns = [
     path("reportes/mensual/",     ResumenMensualView.as_view(),      name="reporte_mensual"),
     path("reportes/top-productos/", ProductosMasVendidosView.as_view(), name="top_productos"),
     path("reportes/anual/", ResumenAnualView.as_view(), name="resumen-anual"),
+    path("gastos/resumen-rango/", GastosResumenRangoView.as_view(), name="gastos_resumen_rango"),
 ]

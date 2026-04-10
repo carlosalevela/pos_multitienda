@@ -4,7 +4,7 @@ from .views import (
     ProductoListCreateView, ProductoDetailView,
     BuscarProductoPOSView, InventarioListView,
     AjustarInventarioView, MovimientosProductoView,
-    TopProductosView
+    TopProductosView,ReactivarProductoView
 )
 
 urlpatterns = [
@@ -30,4 +30,5 @@ urlpatterns = [
         name="movimientos_producto"
     ),
     path('top-productos/', TopProductosView.as_view(), name='top-productos'),
+    path('<int:pk>/reactivar/',ReactivarProductoView.as_view(),name='reactivar-producto'),
 ]

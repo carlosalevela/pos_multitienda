@@ -1,11 +1,12 @@
+# productos/views.py
+
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
-from django.db.models import Q, F
+from django.db.models import Q, F, Sum
 from decimal import Decimal
-from django.db.models import Sum
 
 from .models import Categoria, Producto, Inventario, MovimientoInventario
 from .serializers import (
@@ -14,6 +15,8 @@ from .serializers import (
     MovimientoInventarioSerializer,
 )
 
+
+# ── Permisos ────────────────────────────────────────────────
 
 class EsAdmin(IsAuthenticated):
     def has_permission(self, request, view):
@@ -26,6 +29,7 @@ class EsAdminOSupervisor(IsAuthenticated):
 
 
 # ── Categorías ──────────────────────────────────────────────
+
 class CategoriaListCreateView(generics.ListCreateAPIView):
     queryset           = Categoria.objects.all().order_by("nombre")
     serializer_class   = CategoriaSerializer
@@ -39,12 +43,9 @@ class CategoriaDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 # ── Helper para resolver categoría ─────────────────────────
+
 def _resolver_categoria(raw_nombre: str):
-    """
-    Normaliza el nombre y busca/crea la categoría.
-    ' '.join(raw.split()) colapsa espacios múltiples y caracteres invisibles.
-    """
-    nombre = ' '.join((raw_nombre or '').split())  # ✅ FIX: espacios normalizados
+    nombre = ' '.join((raw_nombre or '').split())
     if not nombre:
         return None
     categoria = Categoria.objects.filter(nombre__iexact=nombre).first()
@@ -54,6 +55,7 @@ def _resolver_categoria(raw_nombre: str):
 
 
 # ── Productos ───────────────────────────────────────────────
+
 class ProductoListCreateView(generics.ListCreateAPIView):
     serializer_class = ProductoSerializer
 
@@ -73,18 +75,22 @@ class ProductoListCreateView(generics.ListCreateAPIView):
             qs = qs.filter(activo=True)
         elif activo == "false":
             qs = qs.filter(activo=False)
+        # "all" → no filtra
 
         if categoria:
             qs = qs.filter(categoria_id=categoria)
         if buscar:
-            qs = qs.filter(Q(nombre__icontains=buscar) | Q(codigo_barras__icontains=buscar))
+            qs = qs.filter(
+                Q(nombre__icontains=buscar) |
+                Q(codigo_barras__icontains=buscar)
+            )
         if tienda_id:
-            qs = qs.filter(inventarios__tienda_id=tienda_id).distinct()
+            qs = qs.filter(
+                inventarios__tienda_id=tienda_id).distinct()
         return qs
 
     @transaction.atomic
     def perform_create(self, serializer):
-        # ✅ FIX 1: normaliza espacios antes de buscar/crear categoría
         categoria = _resolver_categoria(
             self.request.data.get('categoria_nombre', ''))
 
@@ -112,23 +118,20 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class   = ProductoSerializer
     permission_classes = [EsAdminOSupervisor]
 
-    # ✅ FIX 2: sobreescribir partial_update para manejar categoría y stock
     @transaction.atomic
     def partial_update(self, request, *args, **kwargs):
         producto = self.get_object()
 
-        # ✅ Resolver categoría con normalización de espacios
-        extra = {}
+        extra   = {}
         raw_cat = request.data.get('categoria_nombre', '')
         if raw_cat:
             extra['categoria'] = _resolver_categoria(raw_cat)
 
-        # ✅ Actualizar campos del producto (nombre, precio, etc.)
-        serializer = self.get_serializer(producto, data=request.data, partial=True)
+        serializer = self.get_serializer(
+            producto, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         producto = serializer.save(**extra)
 
-        # ✅ Actualizar stock en Inventario si se envían datos
         tienda_id    = request.data.get('tienda_id')
         stock_actual = request.data.get('stock_actual')
         stock_minimo = request.data.get('stock_minimo')
@@ -157,12 +160,47 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
     def destroy(self, request, *args, **kwargs):
         producto = self.get_object()
         producto.activo = False
-        producto.save()
+        producto.save(update_fields=["activo"])
         return Response(
             {"detail": f"Producto '{producto.nombre}' desactivado."},
             status=status.HTTP_200_OK
         )
 
+
+# ── Reactivar producto (solo Admin) ────────────────────────
+
+class ReactivarProductoView(APIView):
+    """PATCH /productos/<pk>/reactivar/"""
+    permission_classes = [EsAdmin]
+
+    def patch(self, request, pk):
+        try:
+            producto = Producto.objects.get(pk=pk)
+        except Producto.DoesNotExist:
+            return Response(
+                {"error": "Producto no encontrado."},
+                status=status.HTTP_404_NOT_FOUND)
+
+        if producto.activo:
+            return Response(
+                {"error": "El producto ya está activo."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        producto.activo = True
+        producto.save(update_fields=["activo"])
+
+        return Response(
+            {
+                "detail": f"Producto '{producto.nombre}' reactivado. ✅",
+                "id":     producto.id,
+                "nombre": producto.nombre,
+                "activo": producto.activo,
+            },
+            status=status.HTTP_200_OK
+        )
+
+
+# ── Búsqueda POS ────────────────────────────────────────────
 
 class BuscarProductoPOSView(APIView):
     permission_classes = [IsAuthenticated]
@@ -172,10 +210,12 @@ class BuscarProductoPOSView(APIView):
         tienda_id = request.query_params.get("tienda_id")
 
         if not q:
-            return Response({"error": "Ingresa un término de búsqueda."}, status=400)
+            return Response(
+                {"error": "Ingresa un término de búsqueda."}, status=400)
 
         productos = Producto.objects.filter(
-            Q(codigo_barras=q) | Q(nombre__icontains=q), activo=True
+            Q(codigo_barras=q) | Q(nombre__icontains=q),
+            activo=True,
         )[:10]
 
         data = []
@@ -196,6 +236,7 @@ class BuscarProductoPOSView(APIView):
 
 
 # ── Inventario ──────────────────────────────────────────────
+
 class InventarioListView(generics.ListAPIView):
     serializer_class   = InventarioSerializer
     permission_classes = [IsAuthenticated]
@@ -204,17 +245,28 @@ class InventarioListView(generics.ListAPIView):
         qs        = Inventario.objects.select_related("producto", "tienda")
         tienda_id = self.request.query_params.get("tienda_id")
         alerta    = self.request.query_params.get("alerta")
+        # ✅ "true" activos | "false" inactivos | "all" todos
+        activo    = self.request.query_params.get("activo", "true")
 
-        qs = qs.filter(producto__activo=True)
+        if activo == "true":
+            qs = qs.filter(producto__activo=True)
+        elif activo == "false":
+            qs = qs.filter(producto__activo=False)
+        # "all" → no filtra
 
         if tienda_id:
             qs = qs.filter(tienda_id=tienda_id)
         if alerta == "bajo":
-            qs = qs.filter(stock_actual__lte=F("stock_minimo"), stock_actual__gt=0)
+            qs = qs.filter(
+                stock_actual__lte=F("stock_minimo"),
+                stock_actual__gt=0)
         elif alerta == "agotado":
             qs = qs.filter(stock_actual__lte=0)
+
         return qs
 
+
+# ── Ajuste de inventario ────────────────────────────────────
 
 class AjustarInventarioView(APIView):
     permission_classes = [EsAdminOSupervisor]
@@ -234,13 +286,15 @@ class AjustarInventarioView(APIView):
                 producto_id=producto_id, tienda_id=tienda_id)
         except Inventario.DoesNotExist:
             return Response(
-                {"error": "Producto no existe en esta tienda."}, status=404)
+                {"error": "Producto no existe en esta tienda."},
+                status=404)
 
         if tipo == "entrada":
             inv.stock_actual += cantidad
         elif tipo == "salida":
             if inv.stock_actual < cantidad:
-                return Response({"error": "Stock insuficiente."}, status=400)
+                return Response(
+                    {"error": "Stock insuficiente."}, status=400)
             inv.stock_actual -= cantidad
         elif tipo == "ajuste":
             inv.stock_actual = cantidad
@@ -264,6 +318,8 @@ class AjustarInventarioView(APIView):
         })
 
 
+# ── Movimientos de producto ─────────────────────────────────
+
 class MovimientosProductoView(generics.ListAPIView):
     serializer_class   = MovimientoInventarioSerializer
     permission_classes = [EsAdminOSupervisor]
@@ -271,9 +327,12 @@ class MovimientosProductoView(generics.ListAPIView):
     def get_queryset(self):
         return MovimientoInventario.objects.filter(
             producto_id = self.kwargs["producto_id"],
-            tienda_id   = self.kwargs["tienda_id"]
+            tienda_id   = self.kwargs["tienda_id"],
         ).select_related("producto", "empleado").order_by("-created_at")
-    
+
+
+# ── Top productos ───────────────────────────────────────────
+
 class TopProductosView(APIView):
     """
     GET /productos/top-productos/
@@ -282,7 +341,6 @@ class TopProductosView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # ✅ Import local evita circular import (ventas ↔ productos)
         from ventas.models import DetalleVenta
 
         tienda_id = request.query_params.get('tienda_id')
@@ -290,31 +348,27 @@ class TopProductosView(APIView):
         fecha_fin = request.query_params.get('fecha_fin')
         limite    = int(request.query_params.get('limite', 20))
 
-        # ✅ Solo ventas completadas (no anuladas)
         qs = DetalleVenta.objects.filter(venta__estado='completada')
 
-        # ── Restricción por rol ────────────────────────
         if request.user.rol == 'cajero':
             qs = qs.filter(venta__tienda_id=request.user.tienda_id)
         elif tienda_id:
             qs = qs.filter(venta__tienda_id=tienda_id)
 
-        # ── Filtros de fecha ───────────────────────────
         if fecha_ini:
             qs = qs.filter(venta__created_at__date__gte=fecha_ini)
         if fecha_fin:
             qs = qs.filter(venta__created_at__date__lte=fecha_fin)
 
-        # ── Agrupación ─────────────────────────────────
         resultado = (
             qs
             .values(
                 'producto__nombre',
-                'producto__categoria__nombre',   # ✅ FK Categoria
+                'producto__categoria__nombre',
             )
             .annotate(
-                total_vendido  = Sum('cantidad'),   # ✅ campo confirmado
-                total_ingresos = Sum('subtotal'),   # ✅ campo confirmado
+                total_vendido  = Sum('cantidad'),
+                total_ingresos = Sum('subtotal'),
             )
             .order_by('-total_ingresos')[:limite]
         )

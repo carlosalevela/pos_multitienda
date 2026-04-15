@@ -10,8 +10,10 @@ from .models import Venta
 from .serializers import VentaSerializer
 from productos.models import Inventario, MovimientoInventario
 from caja.models import SesionCaja
-from devoluciones.models import DetalleDevolucion  # ← nuevo import
+from devoluciones.models import DetalleDevolucion
 
+
+# ── Permisos ───────────────────────────────────────────────────
 
 class EsAdmin(IsAuthenticated):
     def has_permission(self, request, view):
@@ -23,31 +25,57 @@ class EsAdminOSupervisor(IsAuthenticated):
         return super().has_permission(request, view) and request.user.rol in ["admin", "supervisor"]
 
 
+# ── Helper empresa ─────────────────────────────────────────────
+
+def _get_empresa(request):
+    return request.user.empresa
+
+
+# ── Crear venta ────────────────────────────────────────────────
+
 class CrearVentaView(APIView):
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
     def post(self, request):
+        empresa   = _get_empresa(request)
         tienda_id = request.data.get("tienda")
-        sesion    = SesionCaja.objects.filter(tienda_id=tienda_id, estado="abierta").first()
+
+        # ✅ verifica que la tienda pertenezca a la empresa
+        sesion = SesionCaja.objects.filter(
+            tienda_id=tienda_id,
+            tienda__empresa=empresa,    # ✅
+            estado="abierta",
+        ).first()
 
         if not sesion:
-            return Response({"error": "No hay caja abierta en esta tienda. Abre la caja primero."}, status=400)
+            return Response(
+                {"error": "No hay caja abierta en esta tienda. Abre la caja primero."},
+                status=400)
 
         data = request.data.copy()
         data["sesion_caja"] = sesion.id
 
-        serializer = VentaSerializer(data=data)
+        # ✅ context con request — sin esto los validate_* del serializer no funcionan
+        serializer = VentaSerializer(
+            data=data,
+            context={"request": request},   # ✅ CRÍTICO
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
+        # ── Verificar stock antes de guardar ───────────────────
         for item in request.data.get("detalles", []):
             try:
                 inv = Inventario.objects.select_for_update().get(
-                    producto_id=item["producto"], tienda_id=tienda_id
+                    producto_id=item["producto"],
+                    tienda_id=tienda_id,
+                    tienda__empresa=empresa,    # ✅
                 )
             except Inventario.DoesNotExist:
-                return Response({"error": f"Producto ID {item['producto']} sin inventario en esta tienda."}, status=400)
+                return Response(
+                    {"error": f"Producto ID {item['producto']} sin inventario en esta tienda."},
+                    status=400)
 
             if Decimal(str(inv.stock_actual)) < Decimal(str(item["cantidad"])):
                 return Response({
@@ -57,8 +85,12 @@ class CrearVentaView(APIView):
 
         venta = serializer.save(empleado=request.user)
 
+        # ── Descontar stock ────────────────────────────────────
         for detalle in venta.detalles.all():
-            inv = Inventario.objects.select_for_update().get(producto=detalle.producto, tienda_id=tienda_id)
+            inv = Inventario.objects.select_for_update().get(
+                producto=detalle.producto,
+                tienda_id=tienda_id,
+            )
             inv.stock_actual -= detalle.cantidad
             inv.save()
 
@@ -66,7 +98,8 @@ class CrearVentaView(APIView):
                 producto=detalle.producto, tienda_id=tienda_id,
                 empleado=request.user, tipo="salida",
                 cantidad=detalle.cantidad, referencia_tipo="venta",
-                referencia_id=venta.id, observacion=f"Venta {venta.numero_factura}",
+                referencia_id=venta.id,
+                observacion=f"Venta {venta.numero_factura}",
             )
 
         return Response({
@@ -75,22 +108,34 @@ class CrearVentaView(APIView):
             "total":          float(venta.total),
             "vuelto":         float(venta.vuelto),
             "metodo_pago":    venta.metodo_pago,
-            "cliente":        f"{venta.cliente.nombre} {venta.cliente.apellido}" if venta.cliente else "Consumidor Final",
+            "cliente":        (
+                f"{venta.cliente.nombre} {venta.cliente.apellido}"
+                if venta.cliente else "Consumidor Final"
+            ),
             "productos_vendidos": [
-                {"producto": d.producto.nombre, "cantidad": float(d.cantidad), "subtotal": float(d.subtotal)}
+                {
+                    "producto":  d.producto.nombre,
+                    "cantidad":  float(d.cantidad),
+                    "subtotal":  float(d.subtotal),
+                }
                 for d in venta.detalles.all()
             ]
         }, status=201)
 
+
+# ── Listado de ventas ──────────────────────────────────────────
 
 class VentaListView(generics.ListAPIView):
     serializer_class   = VentaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs   = Venta.objects.select_related(
+        empresa = _get_empresa(self.request)
+        qs = Venta.objects.select_related(
             "cliente", "empleado", "tienda", "sesion_caja"
-        ).prefetch_related("detalles")
+        ).prefetch_related("detalles").filter(
+            tienda__empresa=empresa,    # ✅
+        )
         user = self.request.user
 
         if user.rol == "cajero":
@@ -112,20 +157,39 @@ class VentaListView(generics.ListAPIView):
 
         return qs.order_by("-created_at")
 
+    def get_serializer_context(self):
+        # ✅ asegura que el serializer siempre recibe request en listados
+        context = super().get_serializer_context()
+        context["request"] = self.request
+        return context
+
+
+# ── Detalle de venta ───────────────────────────────────────────
 
 class VentaDetailView(generics.RetrieveAPIView):
-    queryset           = Venta.objects.prefetch_related("detalles__producto")
     serializer_class   = VentaSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        # ✅ scoped — no puede ver ventas de otras empresas
+        return Venta.objects.filter(
+            tienda__empresa=_get_empresa(self.request)
+        ).prefetch_related("detalles__producto")
+
+
+# ── Anular venta ───────────────────────────────────────────────
 
 class AnularVentaView(APIView):
     permission_classes = [EsAdmin]
 
     @transaction.atomic
     def post(self, request, pk):
+        empresa = _get_empresa(request)
         try:
-            venta = Venta.objects.prefetch_related("detalles__producto").get(pk=pk)
+            # ✅ scoped — no puede anular ventas de otras empresas
+            venta = Venta.objects.prefetch_related(
+                "detalles__producto"
+            ).get(pk=pk, tienda__empresa=empresa)
         except Venta.DoesNotExist:
             return Response({"error": "Venta no encontrada."}, status=404)
 
@@ -144,7 +208,8 @@ class AnularVentaView(APIView):
                 producto=detalle.producto, tienda=venta.tienda,
                 empleado=request.user, tipo="entrada",
                 cantidad=detalle.cantidad, referencia_tipo="anulacion",
-                referencia_id=venta.id, observacion=f"Anulación venta {venta.numero_factura}",
+                referencia_id=venta.id,
+                observacion=f"Anulación venta {venta.numero_factura}",
             )
 
         venta.estado = "anulada"
@@ -156,19 +221,18 @@ class AnularVentaView(APIView):
         })
 
 
-# ── Disponibilidad para devolución ────────────────────────────────────────────
+# ── Disponibilidad para devolución ─────────────────────────────
+
 class VentaDisponibleDevolucionView(APIView):
-    """
-    GET /api/ventas/<pk>/disponible-devolucion/
-    Devuelve los productos de la venta con cuánto queda disponible para devolver.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
+        empresa = _get_empresa(request)
         try:
+            # ✅ scoped — no puede consultar ventas de otras empresas
             venta = Venta.objects.prefetch_related(
                 "detalles__producto"
-            ).get(pk=pk)
+            ).get(pk=pk, tienda__empresa=empresa)
         except Venta.DoesNotExist:
             return Response(
                 {"error": "Venta no encontrada."},
@@ -187,7 +251,6 @@ class VentaDisponibleDevolucionView(APIView):
                 {"error": "Sin permiso para ver esta venta."},
                 status=status.HTTP_403_FORBIDDEN)
 
-        # Cantidades ya devueltas agrupadas por producto
         ya_devuelto = {
             dd["producto_id"]: dd["total"]
             for dd in (

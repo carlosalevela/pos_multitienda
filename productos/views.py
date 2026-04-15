@@ -1,5 +1,3 @@
-# productos/views.py
-
 from rest_framework import generics, status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -28,30 +26,49 @@ class EsAdminOSupervisor(IsAuthenticated):
         return super().has_permission(request, view) and request.user.rol in ["admin", "supervisor"]
 
 
-# ── Categorías ──────────────────────────────────────────────
+# ── Helper empresa ──────────────────────────────────────────
 
-class CategoriaListCreateView(generics.ListCreateAPIView):
-    queryset           = Categoria.objects.all().order_by("nombre")
-    serializer_class   = CategoriaSerializer
-    permission_classes = [EsAdminOSupervisor]
-
-
-class CategoriaDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset           = Categoria.objects.all()
-    serializer_class   = CategoriaSerializer
-    permission_classes = [EsAdmin]
+def _get_empresa(request):
+    return request.user.empresa
 
 
 # ── Helper para resolver categoría ─────────────────────────
 
-def _resolver_categoria(raw_nombre: str):
+def _resolver_categoria(raw_nombre: str, empresa):
+    """Busca o crea categoría DENTRO de la empresa del usuario."""
     nombre = ' '.join((raw_nombre or '').split())
     if not nombre:
         return None
-    categoria = Categoria.objects.filter(nombre__iexact=nombre).first()
+    categoria = Categoria.objects.filter(
+        nombre__iexact=nombre, empresa=empresa   # ✅ scoped
+    ).first()
     if not categoria:
-        categoria = Categoria.objects.create(nombre=nombre)
+        categoria = Categoria.objects.create(nombre=nombre, empresa=empresa)
     return categoria
+
+
+# ── Categorías ──────────────────────────────────────────────
+
+class CategoriaListCreateView(generics.ListCreateAPIView):
+    serializer_class   = CategoriaSerializer
+    permission_classes = [EsAdminOSupervisor]
+
+    def get_queryset(self):
+        # ✅ solo categorías de la empresa del usuario
+        return Categoria.objects.filter(
+            empresa=_get_empresa(self.request)
+        ).order_by("nombre")
+
+    def perform_create(self, serializer):
+        serializer.save(empresa=_get_empresa(self.request))  # ✅
+
+
+class CategoriaDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class   = CategoriaSerializer
+    permission_classes = [EsAdmin]
+
+    def get_queryset(self):
+        return Categoria.objects.filter(empresa=_get_empresa(self.request))  # ✅
 
 
 # ── Productos ───────────────────────────────────────────────
@@ -65,7 +82,8 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         return [EsAdminOSupervisor()]
 
     def get_queryset(self):
-        qs        = Producto.objects.select_related("categoria").all()
+        empresa   = _get_empresa(self.request)
+        qs        = Producto.objects.select_related("categoria").filter(empresa=empresa)  # ✅
         categoria = self.request.query_params.get("categoria")
         buscar    = self.request.query_params.get("q")
         tienda_id = self.request.query_params.get("tienda_id")
@@ -75,7 +93,6 @@ class ProductoListCreateView(generics.ListCreateAPIView):
             qs = qs.filter(activo=True)
         elif activo == "false":
             qs = qs.filter(activo=False)
-        # "all" → no filtra
 
         if categoria:
             qs = qs.filter(categoria_id=categoria)
@@ -85,16 +102,20 @@ class ProductoListCreateView(generics.ListCreateAPIView):
                 Q(codigo_barras__icontains=buscar)
             )
         if tienda_id:
+            # ✅ además verifica que la tienda sea de la misma empresa
             qs = qs.filter(
-                inventarios__tienda_id=tienda_id).distinct()
+                inventarios__tienda_id=tienda_id,
+                inventarios__tienda__empresa=empresa,
+            ).distinct()
         return qs
 
     @transaction.atomic
     def perform_create(self, serializer):
+        empresa   = _get_empresa(self.request)
         categoria = _resolver_categoria(
-            self.request.data.get('categoria_nombre', ''))
+            self.request.data.get('categoria_nombre', ''), empresa)  # ✅
 
-        producto = serializer.save(categoria=categoria)
+        producto = serializer.save(empresa=empresa, categoria=categoria)  # ✅
 
         tienda_id    = self.request.data.get('tienda_id')
         stock_actual = self.request.data.get('stock_actual', 0)
@@ -102,6 +123,12 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         stock_maximo = self.request.data.get('stock_maximo', 0)
 
         if tienda_id:
+            # ✅ valida que la tienda sea de la empresa antes de crear inventario
+            from tiendas.models import Tienda
+            if not Tienda.objects.filter(id=tienda_id, empresa=empresa).exists():
+                raise serializers.ValidationError(
+                    {"tienda_id": "La tienda no pertenece a tu empresa."})
+
             Inventario.objects.update_or_create(
                 producto  = producto,
                 tienda_id = tienda_id,
@@ -114,21 +141,22 @@ class ProductoListCreateView(generics.ListCreateAPIView):
 
 
 class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset           = Producto.objects.all()
     serializer_class   = ProductoSerializer
     permission_classes = [EsAdminOSupervisor]
 
+    def get_queryset(self):
+        return Producto.objects.filter(empresa=_get_empresa(self.request))  # ✅
+
     @transaction.atomic
     def partial_update(self, request, *args, **kwargs):
-        producto = self.get_object()
-
-        extra   = {}
-        raw_cat = request.data.get('categoria_nombre', '')
+        producto  = self.get_object()
+        empresa   = _get_empresa(request)
+        extra     = {}
+        raw_cat   = request.data.get('categoria_nombre', '')
         if raw_cat:
-            extra['categoria'] = _resolver_categoria(raw_cat)
+            extra['categoria'] = _resolver_categoria(raw_cat, empresa)  # ✅
 
-        serializer = self.get_serializer(
-            producto, data=request.data, partial=True)
+        serializer = self.get_serializer(producto, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         producto = serializer.save(**extra)
 
@@ -138,6 +166,13 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
         stock_maximo = request.data.get('stock_maximo')
 
         if tienda_id:
+            # ✅ valida tienda de la empresa
+            from tiendas.models import Tienda
+            if not Tienda.objects.filter(id=tienda_id, empresa=empresa).exists():
+                return Response(
+                    {"tienda_id": "La tienda no pertenece a tu empresa."},
+                    status=status.HTTP_403_FORBIDDEN)
+
             defaults = {}
             if stock_actual is not None:
                 defaults['stock_actual'] = Decimal(str(stock_actual))
@@ -147,15 +182,9 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
                 defaults['stock_maximo'] = Decimal(str(stock_maximo))
             if defaults:
                 Inventario.objects.update_or_create(
-                    producto  = producto,
-                    tienda_id = tienda_id,
-                    defaults  = defaults,
-                )
+                    producto=producto, tienda_id=tienda_id, defaults=defaults)
 
-        return Response(
-            self.get_serializer(producto).data,
-            status=status.HTTP_200_OK
-        )
+        return Response(self.get_serializer(producto).data, status=status.HTTP_200_OK)
 
     def destroy(self, request, *args, **kwargs):
         producto = self.get_object()
@@ -163,19 +192,19 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
         producto.save(update_fields=["activo"])
         return Response(
             {"detail": f"Producto '{producto.nombre}' desactivado."},
-            status=status.HTTP_200_OK
-        )
+            status=status.HTTP_200_OK)
 
 
-# ── Reactivar producto (solo Admin) ────────────────────────
+# ── Reactivar producto ──────────────────────────────────────
 
 class ReactivarProductoView(APIView):
-    """PATCH /productos/<pk>/reactivar/"""
     permission_classes = [EsAdmin]
 
     def patch(self, request, pk):
+        empresa = _get_empresa(request)
         try:
-            producto = Producto.objects.get(pk=pk)
+            # ✅ scoped a la empresa — ya no puede tocar productos ajenos
+            producto = Producto.objects.get(pk=pk, empresa=empresa)
         except Producto.DoesNotExist:
             return Response(
                 {"error": "Producto no encontrado."},
@@ -188,16 +217,12 @@ class ReactivarProductoView(APIView):
 
         producto.activo = True
         producto.save(update_fields=["activo"])
-
-        return Response(
-            {
-                "detail": f"Producto '{producto.nombre}' reactivado. ✅",
-                "id":     producto.id,
-                "nombre": producto.nombre,
-                "activo": producto.activo,
-            },
-            status=status.HTTP_200_OK
-        )
+        return Response({
+            "detail": f"Producto '{producto.nombre}' reactivado. ✅",
+            "id":     producto.id,
+            "nombre": producto.nombre,
+            "activo": producto.activo,
+        })
 
 
 # ── Búsqueda POS ────────────────────────────────────────────
@@ -208,22 +233,27 @@ class BuscarProductoPOSView(APIView):
     def get(self, request):
         q         = request.query_params.get("q", "").strip()
         tienda_id = request.query_params.get("tienda_id")
+        empresa   = _get_empresa(request)
 
         if not q:
-            return Response(
-                {"error": "Ingresa un término de búsqueda."}, status=400)
+            return Response({"error": "Ingresa un término de búsqueda."}, status=400)
 
         productos = Producto.objects.filter(
             Q(codigo_barras=q) | Q(nombre__icontains=q),
             activo=True,
+            empresa=empresa,    # ✅
         )[:10]
 
         data = []
         for p in productos:
-            item = ProductoSimpleSerializer(p).data
+            item = ProductoSimpleSerializer(p, context={"request": request}).data
             if tienda_id:
+                # ✅ solo consulta inventario de tiendas de la empresa
                 inv = Inventario.objects.filter(
-                    producto=p, tienda_id=tienda_id).first()
+                    producto=p,
+                    tienda_id=tienda_id,
+                    tienda__empresa=empresa,    # ✅
+                ).first()
                 item["stock_actual"] = float(inv.stock_actual) if inv else 0
                 item["alerta_stock"] = (
                     "agotado" if not inv or inv.stock_actual <= 0
@@ -231,7 +261,6 @@ class BuscarProductoPOSView(APIView):
                     else "ok"
                 )
             data.append(item)
-
         return Response(data)
 
 
@@ -242,24 +271,23 @@ class InventarioListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs        = Inventario.objects.select_related("producto", "tienda")
+        empresa   = _get_empresa(self.request)
+        qs        = Inventario.objects.select_related("producto", "tienda").filter(
+            tienda__empresa=empresa    # ✅
+        )
         tienda_id = self.request.query_params.get("tienda_id")
         alerta    = self.request.query_params.get("alerta")
-        # ✅ "true" activos | "false" inactivos | "all" todos
         activo    = self.request.query_params.get("activo", "true")
 
         if activo == "true":
             qs = qs.filter(producto__activo=True)
         elif activo == "false":
             qs = qs.filter(producto__activo=False)
-        # "all" → no filtra
 
         if tienda_id:
             qs = qs.filter(tienda_id=tienda_id)
         if alerta == "bajo":
-            qs = qs.filter(
-                stock_actual__lte=F("stock_minimo"),
-                stock_actual__gt=0)
+            qs = qs.filter(stock_actual__lte=F("stock_minimo"), stock_actual__gt=0)
         elif alerta == "agotado":
             qs = qs.filter(stock_actual__lte=0)
 
@@ -277,24 +305,29 @@ class AjustarInventarioView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
-        tipo        = serializer.validated_data["tipo"]
-        cantidad    = serializer.validated_data["cantidad"]
-        observacion = serializer.validated_data.get("observacion", "")
+        empresa = _get_empresa(request)
 
+        # ✅ verifica que el inventario pertenezca a la empresa
         try:
             inv = Inventario.objects.select_for_update().get(
-                producto_id=producto_id, tienda_id=tienda_id)
+                producto_id=producto_id,
+                tienda_id=tienda_id,
+                tienda__empresa=empresa,    # ✅
+            )
         except Inventario.DoesNotExist:
             return Response(
                 {"error": "Producto no existe en esta tienda."},
                 status=404)
 
+        tipo        = serializer.validated_data["tipo"]
+        cantidad    = serializer.validated_data["cantidad"]
+        observacion = serializer.validated_data.get("observacion", "")
+
         if tipo == "entrada":
             inv.stock_actual += cantidad
         elif tipo == "salida":
             if inv.stock_actual < cantidad:
-                return Response(
-                    {"error": "Stock insuficiente."}, status=400)
+                return Response({"error": "Stock insuficiente."}, status=400)
             inv.stock_actual -= cantidad
         elif tipo == "ajuste":
             inv.stock_actual = cantidad
@@ -302,13 +335,9 @@ class AjustarInventarioView(APIView):
         inv.save()
 
         MovimientoInventario.objects.create(
-            producto_id     = producto_id,
-            tienda_id       = tienda_id,
-            empleado        = request.user,
-            tipo            = tipo,
-            cantidad        = cantidad,
-            referencia_tipo = "manual",
-            observacion     = observacion,
+            producto_id=producto_id, tienda_id=tienda_id,
+            empleado=request.user, tipo=tipo, cantidad=cantidad,
+            referencia_tipo="manual", observacion=observacion,
         )
 
         return Response({
@@ -325,34 +354,38 @@ class MovimientosProductoView(generics.ListAPIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
+        empresa = _get_empresa(self.request)
         return MovimientoInventario.objects.filter(
-            producto_id = self.kwargs["producto_id"],
-            tienda_id   = self.kwargs["tienda_id"],
+            producto_id=self.kwargs["producto_id"],
+            tienda_id=self.kwargs["tienda_id"],
+            tienda__empresa=empresa,    # ✅
         ).select_related("producto", "empleado").order_by("-created_at")
 
 
 # ── Top productos ───────────────────────────────────────────
 
 class TopProductosView(APIView):
-    """
-    GET /productos/top-productos/
-    Params: tienda_id, fecha_ini, fecha_fin, limite (default 20)
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from ventas.models import DetalleVenta
 
+        empresa   = _get_empresa(request)
         tienda_id = request.query_params.get('tienda_id')
         fecha_ini = request.query_params.get('fecha_ini')
         fecha_fin = request.query_params.get('fecha_fin')
         limite    = int(request.query_params.get('limite', 20))
 
-        qs = DetalleVenta.objects.filter(venta__estado='completada')
+        # ✅ base siempre scoped a la empresa
+        qs = DetalleVenta.objects.filter(
+            venta__estado='completada',
+            venta__tienda__empresa=empresa,    # ✅
+        )
 
         if request.user.rol == 'cajero':
             qs = qs.filter(venta__tienda_id=request.user.tienda_id)
         elif tienda_id:
+            # ✅ ya no puede pedir tiendas de otras empresas
             qs = qs.filter(venta__tienda_id=tienda_id)
 
         if fecha_ini:
@@ -361,11 +394,7 @@ class TopProductosView(APIView):
             qs = qs.filter(venta__created_at__date__lte=fecha_fin)
 
         resultado = (
-            qs
-            .values(
-                'producto__nombre',
-                'producto__categoria__nombre',
-            )
+            qs.values('producto__nombre', 'producto__categoria__nombre')
             .annotate(
                 total_vendido  = Sum('cantidad'),
                 total_ingresos = Sum('subtotal'),

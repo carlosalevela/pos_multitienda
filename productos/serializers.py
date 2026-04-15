@@ -6,13 +6,14 @@ class CategoriaSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Categoria
         fields = ["id", "nombre", "descripcion"]
+        read_only_fields = ["id", "empresa"]        # ✅ empresa nunca viene del frontend
 
 
 class ProductoSerializer(serializers.ModelSerializer):
     categoria_nombre = serializers.CharField(
         source="categoria.nombre", read_only=True)
-    stock_actual = serializers.SerializerMethodField()  # ✅
-    stock_minimo = serializers.SerializerMethodField()  # ✅
+    stock_actual = serializers.SerializerMethodField()
+    stock_minimo = serializers.SerializerMethodField()
 
     class Meta:
         model  = Producto
@@ -22,64 +23,63 @@ class ProductoSerializer(serializers.ModelSerializer):
             "precio_compra", "precio_venta",
             "unidad_medida", "aplica_impuesto",
             "porcentaje_impuesto", "activo", "created_at",
-            "stock_actual", "stock_minimo",               # ✅ faltaban aquí
+            "stock_actual", "stock_minimo",
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at", "empresa"]  # ✅
 
-    def get_stock_actual(self, obj):                      # ✅ faltaba este método
-        request   = self.context.get('request')
-        tienda_id = request.query_params.get('tienda_id') if request else None
+    def _get_inventario(self, obj):
+        """
+        Resuelve el inventario UNA sola vez por objeto y lo cachea
+        en el contexto del serializer para evitar doble query.
+        """
+        cache = self.context.setdefault("_inv_cache", {})
+        if obj.pk not in cache:
+            request   = self.context.get("request")
+            tienda_id = request.query_params.get("tienda_id") if request else None
+            qs = Inventario.objects.filter(producto=obj)
+            if tienda_id:
+                qs = qs.filter(tienda_id=tienda_id)
+            cache[obj.pk] = qs.first()
+        return cache[obj.pk]
 
-        qs = Inventario.objects.filter(producto=obj)
-        if tienda_id:
-            qs = qs.filter(tienda_id=tienda_id)
-
-        inv = qs.first()
+    def get_stock_actual(self, obj):
+        inv = self._get_inventario(obj)
         return float(inv.stock_actual) if inv else 0.0
 
-    def get_stock_minimo(self, obj):                      # ✅ faltaba este método
-        request   = self.context.get('request')
-        tienda_id = request.query_params.get('tienda_id') if request else None
-
-        qs = Inventario.objects.filter(producto=obj)
-        if tienda_id:
-            qs = qs.filter(tienda_id=tienda_id)
-
-        inv = qs.first()
+    def get_stock_minimo(self, obj):
+        inv = self._get_inventario(obj)
         return float(inv.stock_minimo) if inv else 0.0
 
 
 class ProductoSimpleSerializer(serializers.ModelSerializer):
     """Para búsquedas rápidas en el POS"""
-    stock_actual = serializers.SerializerMethodField()  # ✅
+    stock_actual = serializers.SerializerMethodField()
 
     class Meta:
         model  = Producto
         fields = [
             "id", "nombre", "codigo_barras", "precio_venta",
             "aplica_impuesto", "porcentaje_impuesto",
-            "unidad_medida", "stock_actual",              # ✅
+            "unidad_medida", "stock_actual",
         ]
+        read_only_fields = ["empresa"]              # ✅
 
-    def get_stock_actual(self, obj):                      # ✅
-        request   = self.context.get('request')
-        tienda_id = request.query_params.get('tienda_id') if request else None
-
-        qs = Inventario.objects.filter(producto=obj)
-        if tienda_id:
-            qs = qs.filter(tienda_id=tienda_id)
-
-        inv = qs.first()
-        return float(inv.stock_actual) if inv else 0.0
+    def get_stock_actual(self, obj):
+        cache = self.context.setdefault("_inv_cache", {})
+        if obj.pk not in cache:
+            request   = self.context.get("request")
+            tienda_id = request.query_params.get("tienda_id") if request else None
+            qs = Inventario.objects.filter(producto=obj)
+            if tienda_id:
+                qs = qs.filter(tienda_id=tienda_id)
+            cache[obj.pk] = qs.first()
+        return float(cache[obj.pk].stock_actual) if cache[obj.pk] else 0.0
 
 
 class InventarioSerializer(serializers.ModelSerializer):
-    producto_nombre  = serializers.CharField(
-        source="producto.nombre", read_only=True)
-    producto_barcode = serializers.CharField(
-        source="producto.codigo_barras", read_only=True)
-    tienda_nombre    = serializers.CharField(
-        source="tienda.nombre", read_only=True)
+    producto_nombre  = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_barcode = serializers.CharField(source="producto.codigo_barras", read_only=True)
+    tienda_nombre    = serializers.CharField(source="tienda.nombre", read_only=True)
     alerta_stock     = serializers.SerializerMethodField()
 
     class Meta:
@@ -107,8 +107,7 @@ class AjusteInventarioSerializer(serializers.Serializer):
 
 
 class MovimientoInventarioSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(
-        source="producto.nombre", read_only=True)
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
     empleado_nombre = serializers.SerializerMethodField()
 
     class Meta:

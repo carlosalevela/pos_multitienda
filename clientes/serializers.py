@@ -10,13 +10,14 @@ class ClienteSerializer(serializers.ModelSerializer):
             "telefono", "email", "direccion",
             "activo", "created_at"
         ]
-        read_only_fields = ["id", "created_at"]
+        read_only_fields = ["id", "created_at", "empresa"]   # ✅
 
 
 class ClienteSimpleSerializer(serializers.ModelSerializer):
     class Meta:
         model  = Cliente
         fields = ["id", "nombre", "apellido", "cedula_nit", "telefono"]
+        read_only_fields = ["empresa"]                         # ✅
 
 
 class DetalleSeparadoSerializer(serializers.ModelSerializer):
@@ -28,6 +29,14 @@ class DetalleSeparadoSerializer(serializers.ModelSerializer):
                   "cantidad", "precio_unitario", "subtotal"]
         read_only_fields = ["id", "subtotal"]
 
+    def validate_producto(self, producto):
+        """Valida que el producto pertenezca a la empresa del usuario."""  # ✅
+        request = self.context.get("request")
+        if request and producto.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "El producto no pertenece a tu empresa.")
+        return producto
+
     def validate(self, attrs):
         attrs["subtotal"] = attrs["cantidad"] * attrs["precio_unitario"]
         return attrs
@@ -35,12 +44,12 @@ class DetalleSeparadoSerializer(serializers.ModelSerializer):
 
 class AbonoSeparadoSerializer(serializers.ModelSerializer):
     empleado_nombre = serializers.SerializerMethodField()
-    cliente_nombre  = serializers.SerializerMethodField()  # ✅ nuevo
+    cliente_nombre  = serializers.SerializerMethodField()
 
     class Meta:
         model  = AbonoSeparado
         fields = ["id", "separado", "empleado", "empleado_nombre",
-                  "cliente_nombre",                              # ✅ nuevo
+                  "cliente_nombre",
                   "monto", "metodo_pago", "created_at"]
         read_only_fields = ["id", "empleado", "created_at"]
 
@@ -49,7 +58,6 @@ class AbonoSeparadoSerializer(serializers.ModelSerializer):
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
 
-    # ✅ nuevo
     def get_cliente_nombre(self, obj):
         if obj.separado and obj.separado.cliente:
             c = obj.separado.cliente
@@ -86,6 +94,22 @@ class SeparadoSerializer(serializers.ModelSerializer):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
+
+    def validate_tienda(self, tienda):
+        """Valida que la tienda pertenezca a la empresa del usuario."""  # ✅
+        request = self.context.get("request")
+        if request and tienda.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "La tienda no pertenece a tu empresa.")
+        return tienda
+
+    def validate_cliente(self, cliente):
+        """Valida que el cliente pertenezca a la empresa del usuario."""  # ✅
+        request = self.context.get("request")
+        if request and cliente.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "El cliente no pertenece a tu empresa.")
+        return cliente
 
     def create(self, validated_data):
         detalles_data = validated_data.pop("detalles")

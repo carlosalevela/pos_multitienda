@@ -1,6 +1,11 @@
 from django.db import models
 
+
 class Proveedor(models.Model):
+    empresa   = models.ForeignKey(                      # ✅ nuevo
+        "empresas.Empresa", on_delete=models.CASCADE,
+        null=True, blank=True, related_name="proveedores"
+    )
     nombre    = models.CharField(max_length=150)
     nit       = models.CharField(max_length=30, unique=True, blank=True, null=True)
     telefono  = models.CharField(max_length=20, blank=True)
@@ -39,6 +44,7 @@ class Compra(models.Model):
     class Meta:
         db_table = "compras"
 
+
 class DetalleCompra(models.Model):
     compra          = models.ForeignKey(Compra, on_delete=models.CASCADE, related_name="detalles")
     producto        = models.ForeignKey(
@@ -46,11 +52,9 @@ class DetalleCompra(models.Model):
         null=True, blank=True,
     )
     nombre_libre    = models.CharField(max_length=200, blank=True, default="")
-    categoria       = models.ForeignKey(           # ← NUEVO
-        "productos.Categoria",
-        on_delete=models.SET_NULL,
-        null=True, blank=True,
-        related_name="detalles_compra"
+    categoria       = models.ForeignKey(
+        "productos.Categoria", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="detalles_compra"
     )
     cantidad        = models.DecimalField(max_digits=12, decimal_places=2)
     precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)

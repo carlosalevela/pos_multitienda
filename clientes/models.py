@@ -1,6 +1,11 @@
 from django.db import models
 
+
 class Cliente(models.Model):
+    empresa    = models.ForeignKey(                     # ✅ nuevo
+        "empresas.Empresa", on_delete=models.CASCADE,
+        null=True, blank=True, related_name="clientes"
+    )
     nombre     = models.CharField(max_length=100)
     apellido   = models.CharField(max_length=100, blank=True)
     cedula_nit = models.CharField(max_length=30, unique=True, blank=True, null=True)
@@ -23,15 +28,15 @@ class Separado(models.Model):
         ("pagado",    "Pagado"),
         ("cancelado", "Cancelado"),
     ]
-    tienda           = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE)
-    cliente          = models.ForeignKey(Cliente, on_delete=models.CASCADE)
-    empleado         = models.ForeignKey("usuarios.Empleado", on_delete=models.SET_NULL, null=True)
-    total            = models.DecimalField(max_digits=12, decimal_places=2)
-    abono_acumulado  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    saldo_pendiente  = models.DecimalField(max_digits=12, decimal_places=2)
-    fecha_limite     = models.DateField(null=True, blank=True)
-    estado           = models.CharField(max_length=15, choices=ESTADO_CHOICES, default="activo")
-    created_at       = models.DateTimeField(auto_now_add=True)
+    tienda          = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE)
+    cliente         = models.ForeignKey(Cliente, on_delete=models.CASCADE)
+    empleado        = models.ForeignKey("usuarios.Empleado", on_delete=models.SET_NULL, null=True)
+    total           = models.DecimalField(max_digits=12, decimal_places=2)
+    abono_acumulado = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    saldo_pendiente = models.DecimalField(max_digits=12, decimal_places=2)
+    fecha_limite    = models.DateField(null=True, blank=True)
+    estado          = models.CharField(max_length=15, choices=ESTADO_CHOICES, default="activo")
+    created_at      = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "separados"
@@ -52,7 +57,7 @@ class AbonoSeparado(models.Model):
     separado    = models.ForeignKey(Separado, on_delete=models.CASCADE, related_name="abonos")
     empleado    = models.ForeignKey("usuarios.Empleado", on_delete=models.SET_NULL, null=True)
     monto       = models.DecimalField(max_digits=12, decimal_places=2)
-    metodo_pago = models.CharField(max_length=20, default="efectivo")
+    metodo_pago  = models.CharField(max_length=20, default="efectivo")
     created_at  = models.DateTimeField(auto_now_add=True)
 
     class Meta:

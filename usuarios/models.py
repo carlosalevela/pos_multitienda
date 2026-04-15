@@ -1,5 +1,5 @@
 from django.db import models
-from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin  # 👈 agrega PermissionsMixin
+from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 
 
 class EmpleadoManager(BaseUserManager):
@@ -7,24 +7,28 @@ class EmpleadoManager(BaseUserManager):
         if not email:
             raise ValueError("El email es obligatorio")
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
+        user  = self.model(email=email, **extra_fields)
         user.set_password(password)
         user.save()
         return user
 
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault("rol", "admin")
-        extra_fields.setdefault("is_staff", True)        # 👈 agrega
-        extra_fields.setdefault("is_superuser", True)    # 👈 agrega
+        extra_fields.setdefault("is_staff", True)
+        extra_fields.setdefault("is_superuser", True)
         return self.create_user(email, password, **extra_fields)
 
 
-class Empleado(AbstractBaseUser, PermissionsMixin):      # 👈 agrega PermissionsMixin
+class Empleado(AbstractBaseUser, PermissionsMixin):
     ROL_CHOICES = [
         ("admin",      "Administrador"),
         ("supervisor", "Supervisor"),
         ("cajero",     "Cajero"),
     ]
+    empresa = models.ForeignKey(                        # ✅ nuevo
+        "empresas.Empresa", on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="empleados"
+    )
     tienda = models.ForeignKey(
         "tiendas.Tienda", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="empleados"
@@ -36,8 +40,7 @@ class Empleado(AbstractBaseUser, PermissionsMixin):      # 👈 agrega Permissio
     rol        = models.CharField(max_length=20, choices=ROL_CHOICES, default="cajero")
     activo     = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
-
-    is_staff   = models.BooleanField(default=False)      # 👈 agrega
+    is_staff   = models.BooleanField(default=False)
 
     USERNAME_FIELD  = "email"
     REQUIRED_FIELDS = ["nombre", "apellido", "cedula"]

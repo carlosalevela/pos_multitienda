@@ -12,13 +12,21 @@ from .serializers import SesionCajaSerializer, AbrirCajaSerializer, CerrarCajaSe
 from clientes.models import Separado, AbonoSeparado
 
 
+# ── Permisos ───────────────────────────────────────────────────
+
 class EsAdminOSupervisor(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) and request.user.rol in ["admin", "supervisor"]
 
 
+# ── Helper empresa ─────────────────────────────────────────────
+
+def _get_empresa(request):
+    return request.user.empresa
+
+
 # ── Abrir caja ────────────────────────────────────────────────
-# caja/views.py
+
 class AbrirCajaView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -27,27 +35,31 @@ class AbrirCajaView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
-        # ✅ Tienda viene del usuario autenticado, no del body
         tienda_id = request.user.tienda_id
         if not tienda_id:
             return Response(
                 {"error": "Este usuario no tiene una tienda asignada."},
-                status=400
-            )
+                status=400)
 
-        monto_inicial = serializer.validated_data["monto_inicial"]
+        # ✅ verifica que la tienda del usuario pertenezca a su empresa
+        empresa = _get_empresa(request)
+        if request.user.tienda.empresa != empresa:
+            return Response(
+                {"error": "La tienda asignada no pertenece a tu empresa."},
+                status=403)
 
+        monto_inicial  = serializer.validated_data["monto_inicial"]
         sesion_abierta = SesionCaja.objects.filter(
             tienda_id=tienda_id, estado="abierta"
         ).first()
 
         if sesion_abierta:
             return Response({
-                "error":      "Ya existe una caja abierta en esta tienda.",
-                "sesion_id":  sesion_abierta.id,
+                "error":       "Ya existe una caja abierta en esta tienda.",
+                "sesion_id":   sesion_abierta.id,
                 "abierta_por": f"{sesion_abierta.empleado.nombre} {sesion_abierta.empleado.apellido}"
                                if sesion_abierta.empleado else "Desconocido",
-                "desde":      sesion_abierta.fecha_apertura,
+                "desde":       sesion_abierta.fecha_apertura,
             }, status=400)
 
         sesion = SesionCaja.objects.create(
@@ -67,12 +79,15 @@ class AbrirCajaView(APIView):
 
 
 # ── Cerrar caja ───────────────────────────────────────────────
+
 class CerrarCajaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, pk):
+        empresa = _get_empresa(request)
         try:
-            sesion = SesionCaja.objects.get(pk=pk)
+            # ✅ scoped — no puede cerrar cajas de otras empresas
+            sesion = SesionCaja.objects.get(pk=pk, tienda__empresa=empresa)
         except SesionCaja.DoesNotExist:
             return Response({"error": "Sesión de caja no encontrada."}, status=404)
 
@@ -98,13 +113,10 @@ class CerrarCajaView(APIView):
             sesion_caja=sesion, metodo_pago="efectivo"
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        # ✅ NUEVO — abonos en efectivo de separados durante esta sesión
         total_abonos = sesion.movimientos.filter(
-            tipo        = "abono_separado",
-            metodo_pago = "efectivo",
+            tipo="abono_separado", metodo_pago="efectivo",
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        # ✅ monto_sistema ahora incluye abonos
         monto_sistema = sesion.monto_inicial + total_ventas + total_abonos - total_gastos
         diferencia    = monto_real - monto_sistema
 
@@ -122,7 +134,7 @@ class CerrarCajaView(APIView):
             "monto_inicial":       float(sesion.monto_inicial),
             "total_ventas":        float(total_ventas),
             "total_gastos":        float(total_gastos),
-            "total_abonos":        float(total_abonos),  # ✅ NUEVO
+            "total_abonos":        float(total_abonos),
             "monto_final_sistema": float(monto_sistema),
             "monto_final_real":    float(monto_real),
             "diferencia":          float(diferencia),
@@ -131,42 +143,72 @@ class CerrarCajaView(APIView):
                                    else f"💰 Sobrante ${diferencia}",
         })
 
+
 # ── Sesión activa de una tienda ───────────────────────────────
+
 class SesionActivaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, tienda_id):
+        empresa = _get_empresa(request)
+        # ✅ verifica que la tienda sea de la empresa antes de mostrar la sesión
         sesion = SesionCaja.objects.filter(
-            tienda_id=tienda_id, estado="abierta"
+            tienda_id=tienda_id,
+            tienda__empresa=empresa,    # ✅
+            estado="abierta",
         ).select_related("empleado", "tienda").first()
 
         if not sesion:
-            return Response({"error": "No hay caja abierta en esta tienda."}, status=404)
+            return Response(
+                {"error": "No hay caja abierta en esta tienda."}, status=404)
 
-        return Response(SesionCajaSerializer(sesion).data)
+        return Response(SesionCajaSerializer(
+            sesion, context={"request": request}   # ✅ context para validate_tienda
+        ).data)
 
 
 # ── Historial y detalle ───────────────────────────────────────
+
 class SesionCajaListView(generics.ListAPIView):
     serializer_class   = SesionCajaSerializer
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
-        qs        = SesionCaja.objects.select_related("empleado","tienda").order_by("-fecha_apertura")
+        empresa = _get_empresa(self.request)
+        qs = SesionCaja.objects.select_related(
+            "empleado", "tienda"
+        ).filter(
+            tienda__empresa=empresa,    # ✅
+        ).order_by("-fecha_apertura")
+
         tienda_id = self.request.query_params.get("tienda_id")
         estado    = self.request.query_params.get("estado")
         fecha     = self.request.query_params.get("fecha")
+
         if tienda_id: qs = qs.filter(tienda_id=tienda_id)
         if estado:    qs = qs.filter(estado=estado)
         if fecha:     qs = qs.filter(fecha_apertura__date=fecha)
         return qs
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["request"] = self.request
+        return context
+
+
 class SesionCajaDetailView(generics.RetrieveAPIView):
-    queryset           = SesionCaja.objects.select_related("empleado","tienda")
     serializer_class   = SesionCajaSerializer
     permission_classes = [IsAuthenticated]
 
+    def get_queryset(self):
+        # ✅ scoped — no puede ver sesiones de otras empresas
+        return SesionCaja.objects.filter(
+            tienda__empresa=_get_empresa(self.request)
+        ).select_related("empleado", "tienda")
+
+
 # ── Resumen pre-cierre ────────────────────────────────────────
+
 class ResumenCierreView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -174,78 +216,78 @@ class ResumenCierreView(APIView):
         from ventas.models import Venta
         from contabilidad.models import Gasto
 
+        empresa = _get_empresa(request)
         try:
+            # ✅ scoped — no puede ver resumen de cajas ajenas
             sesion = SesionCaja.objects.select_related(
-                'tienda', 'empleado').get(pk=pk, estado='abierta')
+                "tienda", "empleado"
+            ).get(pk=pk, estado="abierta", tienda__empresa=empresa)
         except SesionCaja.DoesNotExist:
             return Response(
                 {"error": "Sesión no encontrada o ya cerrada."}, status=404)
 
-        def agg(qs):  return qs.aggregate(t=Sum('monto'))['t']  or Decimal('0')
-        def vsum(qs): return qs.aggregate(t=Sum('total'))['t']  or Decimal('0')
+        def agg(qs):  return qs.aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        def vsum(qs): return qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
 
-        base_v = Venta.objects.filter(sesion_caja=sesion, estado='completada')
+        base_v = Venta.objects.filter(sesion_caja=sesion, estado="completada")
         base_g = Gasto.objects.filter(sesion_caja=sesion)
 
-        v_efectivo       = vsum(base_v.filter(metodo_pago='efectivo'))
-        v_tarjeta        = vsum(base_v.filter(metodo_pago='tarjeta'))
-        v_transferencia  = vsum(base_v.filter(metodo_pago='transferencia'))
-        v_mixto          = vsum(base_v.filter(metodo_pago='mixto'))
-        total_ventas     = v_efectivo + v_tarjeta + v_transferencia + v_mixto
+        v_efectivo        = vsum(base_v.filter(metodo_pago="efectivo"))
+        v_tarjeta         = vsum(base_v.filter(metodo_pago="tarjeta"))
+        v_transferencia   = vsum(base_v.filter(metodo_pago="transferencia"))
+        v_mixto           = vsum(base_v.filter(metodo_pago="mixto"))
+        total_ventas      = v_efectivo + v_tarjeta + v_transferencia + v_mixto
         num_transacciones = base_v.count()
 
-        g_efectivo = agg(base_g.filter(metodo_pago='efectivo'))
-        g_otros    = agg(base_g.exclude(metodo_pago='efectivo'))
-        total_g    = g_efectivo + g_otros
-        detalle_gastos = list(base_g.values('categoria', 'monto', 'metodo_pago'))
+        g_efectivo     = agg(base_g.filter(metodo_pago="efectivo"))
+        g_otros        = agg(base_g.exclude(metodo_pago="efectivo"))
+        total_g        = g_efectivo + g_otros
+        detalle_gastos = list(base_g.values("categoria", "monto", "metodo_pago"))
 
-        # ✅ NUEVO — abonos separados desde MovimientoCaja
-        base_a          = sesion.movimientos.filter(tipo='abono_separado')
-        a_efectivo      = agg(base_a.filter(metodo_pago='efectivo'))
-        a_transferencia = agg(base_a.filter(metodo_pago='transferencia'))
-        a_tarjeta       = agg(base_a.filter(metodo_pago='tarjeta'))
+        base_a          = sesion.movimientos.filter(tipo="abono_separado")
+        a_efectivo      = agg(base_a.filter(metodo_pago="efectivo"))
+        a_transferencia = agg(base_a.filter(metodo_pago="transferencia"))
+        a_tarjeta       = agg(base_a.filter(metodo_pago="tarjeta"))
         total_abonos    = a_efectivo + a_transferencia + a_tarjeta
         num_abonos      = base_a.count()
 
-        # ✅ monto_esperado ahora incluye abonos en efectivo
         monto_esperado = (
             sesion.monto_inicial
             + v_efectivo
             + v_mixto
-            + a_efectivo      # ✅ NUEVO
+            + a_efectivo
             - g_efectivo
         )
 
         nombre = f"{sesion.empleado.nombre} {sesion.empleado.apellido}" \
-                 if sesion.empleado else ''
+                 if sesion.empleado else ""
 
         return Response({
-            'sesion_id':       sesion.id,
-            'tienda_nombre':   sesion.tienda.nombre,
-            'empleado_nombre': nombre,
-            'fecha_apertura':  sesion.fecha_apertura,
-            'monto_inicial':   float(sesion.monto_inicial),
-            'ventas': {
-                'efectivo':          float(v_efectivo),
-                'tarjeta':           float(v_tarjeta),
-                'transferencia':     float(v_transferencia),
-                'mixto':             float(v_mixto),
-                'total':             float(total_ventas),
-                'num_transacciones': num_transacciones,
+            "sesion_id":       sesion.id,
+            "tienda_nombre":   sesion.tienda.nombre,
+            "empleado_nombre": nombre,
+            "fecha_apertura":  sesion.fecha_apertura,
+            "monto_inicial":   float(sesion.monto_inicial),
+            "ventas": {
+                "efectivo":          float(v_efectivo),
+                "tarjeta":           float(v_tarjeta),
+                "transferencia":     float(v_transferencia),
+                "mixto":             float(v_mixto),
+                "total":             float(total_ventas),
+                "num_transacciones": num_transacciones,
             },
-            'gastos': {
-                'efectivo': float(g_efectivo),
-                'otros':    float(g_otros),
-                'total':    float(total_g),
-                'detalle':  detalle_gastos,
+            "gastos": {
+                "efectivo": float(g_efectivo),
+                "otros":    float(g_otros),
+                "total":    float(total_g),
+                "detalle":  detalle_gastos,
             },
-            # ✅ NUEVO — sección completa de abonos
-            'abonos': {
-                'efectivo':      float(a_efectivo),
-                'transferencia': float(a_transferencia),
-                'tarjeta':       float(a_tarjeta),
-                'total':         float(total_abonos),
-                'cantidad':      num_abonos,
+            "abonos": {
+                "efectivo":      float(a_efectivo),
+                "transferencia": float(a_transferencia),
+                "tarjeta":       float(a_tarjeta),
+                "total":         float(total_abonos),
+                "cantidad":      num_abonos,
             },
-            'monto_esperado_caja': float(monto_esperado),
+            "monto_esperado_caja": float(monto_esperado),
         })

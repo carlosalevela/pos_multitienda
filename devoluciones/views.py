@@ -14,9 +14,9 @@ from .models import Devolucion, DetalleDevolucion
 from .serializers import DevolucionSerializer
 
 
-# ── Permisos ──────────────────────────────────────────────────────────────────
+# ── Permisos ───────────────────────────────────────────────────
+
 class PuedeCrearDevolucion(BasePermission):
-    """Admin, supervisor y cajero pueden crear/ver devoluciones."""
     def has_permission(self, request, view):
         return (
             request.user
@@ -24,8 +24,8 @@ class PuedeCrearDevolucion(BasePermission):
             and request.user.rol in ("admin", "supervisor", "cajero")
         )
 
+
 class PuedeCancelarDevolucion(BasePermission):
-    """Solo admin o supervisor pueden cancelar devoluciones."""
     def has_permission(self, request, view):
         return (
             request.user
@@ -34,7 +34,14 @@ class PuedeCancelarDevolucion(BasePermission):
         )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Helper empresa ─────────────────────────────────────────────
+
+def _get_empresa(request):
+    return request.user.empresa
+
+
+# ── Helpers de stock ───────────────────────────────────────────
+
 def _restaurar_stock(devolucion: Devolucion, empleado, venta) -> None:
     for detalle in devolucion.detalles.select_related("producto"):
         inv = (
@@ -91,15 +98,22 @@ def _revertir_stock(devolucion: Devolucion, empleado) -> None:
         )
 
 
-# ── Crear devolución ──────────────────────────────────────────────────────────
+# ── Crear devolución ───────────────────────────────────────────
+
 class CrearDevolucionView(APIView):
-    permission_classes = [PuedeCrearDevolucion]   # ✅ cajero incluido
+    permission_classes = [PuedeCrearDevolucion]
 
     @transaction.atomic
     def post(self, request):
+        empresa  = _get_empresa(request)
         venta_id = request.data.get("venta")
+
         try:
-            venta = Venta.objects.prefetch_related("detalles").get(pk=venta_id)
+            # ✅ scoped — no puede devolver ventas de otras empresas
+            venta = Venta.objects.prefetch_related("detalles").get(
+                pk=venta_id,
+                tienda__empresa=empresa,        # ✅
+            )
         except (Venta.DoesNotExist, TypeError, ValueError):
             return Response(
                 {"error": "Venta no encontrada."},
@@ -110,7 +124,6 @@ class CrearDevolucionView(APIView):
                 {"error": "No se puede devolver una venta anulada."},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        # ✅ Supervisor y cajero solo pueden operar su tienda
         if (request.user.rol in ("supervisor", "cajero")
                 and hasattr(request.user, "tienda_id")
                 and venta.tienda_id != request.user.tienda_id):
@@ -118,7 +131,11 @@ class CrearDevolucionView(APIView):
                 {"error": "No tienes permiso para devolver ventas de otra tienda."},
                 status=status.HTTP_403_FORBIDDEN)
 
-        serializer = DevolucionSerializer(data=request.data)
+        # ✅ context con request — sin esto validate_venta y validate_producto no ejecutan
+        serializer = DevolucionSerializer(
+            data=request.data,
+            context={"request": request},       # ✅ CRÍTICO
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -165,11 +182,11 @@ class CrearDevolucionView(APIView):
 
         return Response(
             {
-                "detail":          "Devolución procesada correctamente. ✅",
-                "devolucion_id":   devolucion.id,
-                "venta":           venta.numero_factura,
-                "total_devuelto":  float(devolucion.total_devuelto),
-                "metodo":          devolucion.metodo_devolucion,
+                "detail":         "Devolución procesada correctamente. ✅",
+                "devolucion_id":  devolucion.id,
+                "venta":          venta.numero_factura,
+                "total_devuelto": float(devolucion.total_devuelto),
+                "metodo":         devolucion.metodo_devolucion,
                 "productos_devueltos": [
                     {
                         "producto": d.producto.nombre,
@@ -183,25 +200,27 @@ class CrearDevolucionView(APIView):
         )
 
 
-# ── Cancelar devolución ───────────────────────────────────────────────────────
+# ── Cancelar devolución ────────────────────────────────────────
+
 class CancelarDevolucionView(APIView):
-    permission_classes = [PuedeCancelarDevolucion]  # ✅ cajero excluido
+    permission_classes = [PuedeCancelarDevolucion]
 
     @transaction.atomic
     def post(self, request, pk):
+        empresa = _get_empresa(request)
         try:
+            # ✅ scoped — no puede cancelar devoluciones de otras empresas
             devolucion = (
                 Devolucion.objects
                 .select_related("venta")
                 .prefetch_related("detalles__producto")
-                .get(pk=pk)
+                .get(pk=pk, tienda__empresa=empresa)    # ✅
             )
         except Devolucion.DoesNotExist:
             return Response(
                 {"error": "Devolución no encontrada."},
                 status=status.HTTP_404_NOT_FOUND)
 
-        # ✅ Supervisor solo puede cancelar devoluciones de su tienda
         if (request.user.rol == "supervisor"
                 and hasattr(request.user, "tienda_id")
                 and devolucion.tienda_id != request.user.tienda_id):
@@ -227,51 +246,54 @@ class CancelarDevolucionView(APIView):
         )
 
 
-# ── Listar devoluciones ───────────────────────────────────────────────────────
+# ── Listar devoluciones ────────────────────────────────────────
+
 class DevolucionListView(generics.ListAPIView):
     serializer_class   = DevolucionSerializer
-    permission_classes = [PuedeCrearDevolucion]  # ✅ cajero puede ver
+    permission_classes = [PuedeCrearDevolucion]
 
     def get_queryset(self):
+        empresa = _get_empresa(self.request)
         qs = (
             Devolucion.objects
             .select_related("venta", "tienda", "empleado")
             .prefetch_related("detalles__producto")
+            .filter(tienda__empresa=empresa)            # ✅
         )
         p = self.request.query_params
 
-        # ✅ Supervisor y cajero ven solo su tienda automáticamente
         if self.request.user.rol in ("supervisor", "cajero"):
             qs = qs.filter(tienda_id=self.request.user.tienda_id)
         elif tienda_id := p.get("tienda_id"):
             qs = qs.filter(tienda_id=tienda_id)
 
-        if estado := p.get("estado"):
-            qs = qs.filter(estado=estado)
-
-        if fecha := p.get("fecha"):
-            qs = qs.filter(created_at__date=fecha)
-
-        if fecha_ini := p.get("fechaIni"):
-            qs = qs.filter(created_at__date__gte=fecha_ini)
-        if fecha_fin := p.get("fechaFin"):
-            qs = qs.filter(created_at__date__lte=fecha_fin)
+        if estado   := p.get("estado"):    qs = qs.filter(estado=estado)
+        if fecha    := p.get("fecha"):     qs = qs.filter(created_at__date=fecha)
+        if fecha_ini := p.get("fechaIni"): qs = qs.filter(created_at__date__gte=fecha_ini)
+        if fecha_fin := p.get("fechaFin"): qs = qs.filter(created_at__date__lte=fecha_fin)
 
         return qs.order_by("-created_at")
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context["request"] = self.request              # ✅
+        return context
 
-# ── Detalle devolución ────────────────────────────────────────────────────────
+
+# ── Detalle devolución ─────────────────────────────────────────
+
 class DevolucionDetailView(generics.RetrieveAPIView):
     serializer_class   = DevolucionSerializer
-    permission_classes = [PuedeCrearDevolucion]  # ✅ cajero puede ver
+    permission_classes = [PuedeCrearDevolucion]
 
     def get_queryset(self):
+        empresa = _get_empresa(self.request)
         qs = (
             Devolucion.objects
             .select_related("venta", "tienda", "empleado")
             .prefetch_related("detalles__producto")
+            .filter(tienda__empresa=empresa)            # ✅
         )
-        # ✅ Supervisor y cajero no pueden ver detalles de otra tienda
         if self.request.user.rol in ("supervisor", "cajero"):
             qs = qs.filter(tienda_id=self.request.user.tienda_id)
         return qs

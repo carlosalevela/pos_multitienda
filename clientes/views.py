@@ -17,20 +17,32 @@ from .serializers import (
 
 
 # ── Permisos ───────────────────────────────────────────────────
+
 class EsAdminOSupervisor(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) \
                and request.user.rol in ["admin", "supervisor"]
 
 
+# ── Helper empresa ─────────────────────────────────────────────
+
+def _get_empresa(request):
+    return request.user.empresa
+
+
 # ── Clientes ──────────────────────────────────────────────────
+
 class ClienteListCreateView(generics.ListCreateAPIView):
     serializer_class   = ClienteSerializer
-    permission_classes = [IsAuthenticated]  # ✅ todos pueden listar y crear
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Cliente.objects.filter(activo=True).order_by("nombre")
-        q  = self.request.query_params.get("q")
+        empresa = _get_empresa(self.request)
+        qs = Cliente.objects.filter(
+            activo=True,
+            empresa=empresa,        # ✅
+        ).order_by("nombre")
+        q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(
                 Q(nombre__icontains=q)     |
@@ -40,16 +52,21 @@ class ClienteListCreateView(generics.ListCreateAPIView):
             )
         return qs
 
+    def perform_create(self, serializer):
+        serializer.save(empresa=_get_empresa(self.request))  # ✅
+
 
 class ClienteDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset         = Cliente.objects.all()
     serializer_class = ClienteSerializer
 
-    # ✅ GET → cualquier autenticado | PUT/PATCH/DELETE → solo admin o supervisor
     def get_permissions(self):
         if self.request.method in ("PUT", "PATCH", "DELETE"):
             return [EsAdminOSupervisor()]
         return [IsAuthenticated()]
+
+    def get_queryset(self):
+        # ✅ scoped — nunca toca clientes de otras empresas
+        return Cliente.objects.filter(empresa=_get_empresa(self.request))
 
     def destroy(self, request, *args, **kwargs):
         cliente = self.get_object()
@@ -63,8 +80,12 @@ class ClienteSimpleListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Cliente.objects.filter(activo=True).order_by("nombre")
-        q  = self.request.query_params.get("q")
+        empresa = _get_empresa(self.request)
+        qs = Cliente.objects.filter(
+            activo=True,
+            empresa=empresa,        # ✅
+        ).order_by("nombre")
+        q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(
                 Q(nombre__icontains=q) | Q(cedula_nit__icontains=q)
@@ -73,19 +94,23 @@ class ClienteSimpleListView(generics.ListAPIView):
 
 
 # ── Separados ─────────────────────────────────────────────────
+
 class SeparadoListCreateView(generics.ListCreateAPIView):
     serializer_class   = SeparadoSerializer
-    permission_classes = [IsAuthenticated]  # ✅ cajero puede crear separados
+    permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        empresa = _get_empresa(self.request)
         qs = Separado.objects.select_related(
-        "cliente", "tienda", "empleado"
-    ).prefetch_related("detalles", "abonos")
+            "cliente", "tienda", "empleado"
+        ).prefetch_related("detalles", "abonos").filter(
+            tienda__empresa=empresa,    # ✅
+        )
 
         tienda_id      = self.request.query_params.get("tienda_id")
         estado         = self.request.query_params.get("estado")
         cliente        = self.request.query_params.get("cliente_id")
-        fecha_creacion = self.request.query_params.get("fecha_creacion")  # ✅ nuevo
+        fecha_creacion = self.request.query_params.get("fecha_creacion")
 
         if self.request.user.rol == "cajero":
             qs = qs.filter(tienda_id=self.request.user.tienda_id)
@@ -94,7 +119,7 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
         if estado:          qs = qs.filter(estado=estado)
         if cliente:         qs = qs.filter(cliente_id=cliente)
-        if fecha_creacion:  qs = qs.filter(created_at__date=fecha_creacion)  # ✅ nuevo
+        if fecha_creacion:  qs = qs.filter(created_at__date=fecha_creacion)
 
         return qs.order_by("-created_at")
 
@@ -103,10 +128,14 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
 
 class SeparadoDetailView(generics.RetrieveAPIView):
-    queryset           = Separado.objects.prefetch_related(
-                             "detalles__producto", "abonos__empleado")
     serializer_class   = SeparadoSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # ✅ scoped — no puede ver separados de otras empresas
+        return Separado.objects.filter(
+            tienda__empresa=_get_empresa(self.request)
+        ).prefetch_related("detalles__producto", "abonos__empleado")
 
 
 class AbonarSeparadoView(APIView):
@@ -114,8 +143,13 @@ class AbonarSeparadoView(APIView):
 
     @transaction.atomic
     def post(self, request, pk):
+        empresa = _get_empresa(request)
         try:
-            separado = Separado.objects.select_for_update().get(pk=pk)
+            # ✅ scoped a empresa — no puede abonar a separados ajenos
+            separado = Separado.objects.select_for_update().get(
+                pk=pk,
+                tienda__empresa=empresa,
+            )
         except Separado.DoesNotExist:
             return Response({"error": "Separado no encontrado."}, status=404)
 
@@ -153,7 +187,6 @@ class AbonarSeparadoView(APIView):
 
         separado.save()
 
-        # ✅ Registrar en caja si hay sesión abierta
         from caja.models import SesionCaja, MovimientoCaja
         sesion = SesionCaja.objects.filter(
             tienda_id=separado.tienda_id,
@@ -185,39 +218,34 @@ class AbonarSeparadoView(APIView):
 
 
 class CancelarSeparadoView(APIView):
-    permission_classes = [EsAdminOSupervisor]  # ✅ cajero NO puede cancelar
+    permission_classes = [EsAdminOSupervisor]
 
     @transaction.atomic
     def post(self, request, pk):
+        empresa = _get_empresa(request)
         try:
+            # ✅ scoped a empresa
             separado = Separado.objects.prefetch_related(
                 "detalles__producto"
-            ).get(pk=pk)
+            ).get(pk=pk, tienda__empresa=empresa)
         except Separado.DoesNotExist:
             return Response({"error": "Separado no encontrado."}, status=404)
 
         if separado.estado == "pagado":
             return Response(
                 {"error": "No se puede cancelar un separado ya pagado."},
-                status=400
-            )
+                status=400)
 
         if separado.estado == "cancelado":
             return Response(
                 {"error": "Este separado ya está cancelado."},
-                status=400
-            )
+                status=400)
 
-        # ✅ Restaurar stock por cada detalle
         for detalle in separado.detalles.all():
             inv, _ = Inventario.objects.select_for_update().get_or_create(
                 producto = detalle.producto,
                 tienda   = separado.tienda,
-                defaults = {
-                    "stock_actual": 0,
-                    "stock_minimo": 0,
-                    "stock_maximo": 0,
-                }
+                defaults = {"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0}
             )
             inv.stock_actual += detalle.cantidad
             inv.save()
@@ -239,24 +267,24 @@ class CancelarSeparadoView(APIView):
         return Response({
             "detail": f"Separado #{separado.id} cancelado. Stock restaurado. ✅",
             "productos_restaurados": [
-                {
-                    "producto": d.producto.nombre,
-                    "cantidad": float(d.cantidad),
-                }
+                {"producto": d.producto.nombre, "cantidad": float(d.cantidad)}
                 for d in separado.detalles.all()
             ]
         })
-    
+
+
 class AlertasSeparadosView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        empresa = _get_empresa(request)
         hoy     = timezone.now().date()
         en3dias = hoy + timedelta(days=3)
 
         qs = Separado.objects.filter(
             estado='activo',
-            fecha_limite__isnull=False  # ✅ única línea nueva
+            fecha_limite__isnull=False,
+            tienda__empresa=empresa,    # ✅
         ).select_related('cliente', 'tienda')
 
         if request.user.rol == 'cajero':
@@ -284,13 +312,13 @@ class AlertasSeparadosView(APIView):
             'por_vencer':    [serializar(s) for s in por_vencer],
             'total_alertas': vencidos.count() + por_vencer.count(),
         })
-    
 
-# ✅ NUEVO — para el reporte del día en Flutter
+
 class AbonosPorFechaView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        empresa   = _get_empresa(request)
         fecha     = request.query_params.get("fecha")
         tienda_id = request.query_params.get("tienda_id")
 
@@ -299,7 +327,10 @@ class AbonosPorFechaView(APIView):
 
         qs = AbonoSeparado.objects.select_related(
             "separado__cliente", "empleado"
-        ).filter(created_at__date=fecha)
+        ).filter(
+            created_at__date=fecha,
+            separado__tienda__empresa=empresa,  # ✅
+        )
 
         if request.user.rol == "cajero":
             qs = qs.filter(separado__tienda_id=request.user.tienda_id)

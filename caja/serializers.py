@@ -24,6 +24,14 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "monto_final_sistema", "diferencia", "estado"
         ]
 
+    def validate_tienda(self, tienda):
+        """Valida que la tienda sea de la empresa del usuario."""  # ✅
+        request = self.context.get("request")
+        if request and tienda.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "La tienda no pertenece a tu empresa.")
+        return tienda
+
     def get_empleado_nombre(self, obj):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
@@ -47,7 +55,6 @@ class SesionCajaSerializer(serializers.ModelSerializer):
 
 
 class AbrirCajaSerializer(serializers.Serializer):
-    #tienda_id     = serializers.IntegerField()
     monto_inicial = serializers.DecimalField(max_digits=12, decimal_places=2)
 
 

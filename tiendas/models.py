@@ -1,6 +1,10 @@
 from django.db import models
 
 class Tienda(models.Model):
+    empresa   = models.ForeignKey(                    # ✅ nuevo
+        'empresas.Empresa', on_delete=models.CASCADE,
+        null=True, blank=True, related_name='tiendas'
+    )
     nombre    = models.CharField(max_length=100)
     direccion = models.CharField(max_length=200, blank=True)
     telefono  = models.CharField(max_length=20, blank=True)

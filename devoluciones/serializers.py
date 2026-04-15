@@ -20,6 +20,14 @@ class DetalleDevolucionSerializer(serializers.ModelSerializer):
                 "La cantidad debe ser mayor a 0.")
         return value
 
+    def validate_producto(self, producto):
+        """Valida que el producto pertenezca a la empresa."""  # ✅
+        request = self.context.get("request")
+        if request and producto.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "El producto no pertenece a tu empresa.")
+        return producto
+
     def validate(self, attrs):
         attrs["subtotal"] = attrs["cantidad"] * attrs["precio_unitario"]
         return attrs
@@ -53,16 +61,32 @@ class DevolucionSerializer(serializers.ModelSerializer):
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
 
+    def validate_venta(self, venta):
+        """Valida que la venta pertenezca a la empresa del usuario."""  # ✅
+        request = self.context.get("request")
+        if request and venta.tienda.empresa != request.user.empresa:
+            raise serializers.ValidationError(
+                "La venta no pertenece a tu empresa.")
+        if venta.estado == "anulada":
+            raise serializers.ValidationError(
+                "No se puede devolver una venta anulada.")
+        return venta
+
     def validate_detalles(self, value):
         if not value:
             raise serializers.ValidationError(
                 "Debes incluir al menos un producto a devolver.")
-        # Detectar productos duplicados en el mismo request
         ids = [d["producto"].id for d in value]
         if len(ids) != len(set(ids)):
             raise serializers.ValidationError(
                 "No puedes repetir el mismo producto en la devolución.")
         return value
+
+    def get_fields(self):
+        # ✅ propaga context a los detalles anidados
+        fields = super().get_fields()
+        fields["detalles"].child.context.update(self.context)
+        return fields
 
     def create(self, validated_data):
         detalles_data = validated_data.pop("detalles")

@@ -4,6 +4,7 @@ from .views import (
     CancelarDevolucionView,
     DevolucionListView,
     DevolucionDetailView,
+    CambioProductoView
 )
 
 urlpatterns = [
@@ -12,6 +13,8 @@ urlpatterns = [
 
     # GET   /api/devoluciones/lista/
     path("lista/",             DevolucionListView.as_view(),    name="lista_devoluciones"),
+
+    path("cambio/", CambioProductoView.as_view(), name="cambio_producto"),
 
     # GET   /api/devoluciones/<id>/
     path("<int:pk>/",          DevolucionDetailView.as_view(),  name="devolucion_detail"),

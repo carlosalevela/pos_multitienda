@@ -1,3 +1,5 @@
+# ventas/views.py
+
 from decimal import Decimal
 from rest_framework import generics, status
 from rest_framework.views import APIView
@@ -6,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Sum
 
+from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
 from .models import Venta
 from .serializers import VentaSerializer, CambioPOSSerializer
 from productos.models import Inventario, MovimientoInventario
@@ -13,32 +16,13 @@ from caja.models import SesionCaja
 from devoluciones.models import DetalleDevolucion
 
 
-# ── Permisos ───────────────────────────────────────────────────
-
-class EsAdmin(IsAuthenticated):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and request.user.rol == "admin"
-
-
-class EsAdminOSupervisor(IsAuthenticated):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and request.user.rol in ["admin", "supervisor"]
-
-
-# ── Helper empresa ─────────────────────────────────────────────
-
-def _get_empresa(request):
-    return request.user.empresa
-
-
-# ── Crear venta ────────────────────────────────────────────────
-
+# ── Crear venta ───────────────────────────────────────────
 class CrearVentaView(APIView):
     permission_classes = [IsAuthenticated]
 
     @transaction.atomic
     def post(self, request):
-        empresa   = _get_empresa(request)
+        empresa   = get_empresa(request)
         tienda_id = request.data.get("tienda")
 
         sesion = SesionCaja.objects.filter(
@@ -55,7 +39,8 @@ class CrearVentaView(APIView):
         data = request.data.copy()
         data["sesion_caja"] = sesion.id
 
-        serializer = VentaSerializer(data=data, context={"request": request})
+        serializer = VentaSerializer(
+            data=data, context={"request": request})
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
@@ -101,7 +86,7 @@ class CrearVentaView(APIView):
             "total":          float(venta.total),
             "vuelto":         float(venta.vuelto),
             "metodo_pago":    venta.metodo_pago,
-            "cliente":        (
+            "cliente": (
                 f"{venta.cliente.nombre} {venta.cliente.apellido}"
                 if venta.cliente else "Consumidor Final"
             ),
@@ -116,19 +101,26 @@ class CrearVentaView(APIView):
         }, status=201)
 
 
-# ── Listado de ventas ──────────────────────────────────────────
-
+# ── Listado de ventas ─────────────────────────────────────
 class VentaListView(generics.ListAPIView):
     serializer_class   = VentaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        empresa = _get_empresa(self.request)
-        qs = Venta.objects.select_related(
-            "cliente", "empleado", "tienda", "sesion_caja"
-        ).prefetch_related("detalles").filter(tienda__empresa=empresa)
         user = self.request.user
+        qs   = Venta.objects.select_related(
+            "cliente", "empleado", "tienda", "sesion_caja"
+        ).prefetch_related("detalles")
 
+        # superadmin ve todo, filtra por empresa opcional
+        if es_superadmin(self.request):
+            empresa_id = self.request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+
+        # cajero solo ve su tienda y puede filtrar por fecha
         if user.rol == "cajero":
             qs    = qs.filter(tienda_id=user.tienda_id)
             fecha = self.request.query_params.get("fecha")
@@ -154,40 +146,41 @@ class VentaListView(generics.ListAPIView):
         return context
 
 
-# ── Detalle de venta ───────────────────────────────────────────
-
+# ── Detalle de venta ──────────────────────────────────────
 class VentaDetailView(generics.RetrieveAPIView):
     serializer_class   = VentaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        if es_superadmin(self.request):
+            return Venta.objects.prefetch_related("detalles__producto")
         return Venta.objects.filter(
-            tienda__empresa=_get_empresa(self.request)
+            tienda__empresa=get_empresa(self.request)
         ).prefetch_related("detalles__producto")
 
 
-# ── Anular venta ───────────────────────────────────────────────
-
+# ── Anular venta ──────────────────────────────────────────
 class AnularVentaView(APIView):
     permission_classes = [EsAdmin]
 
     @transaction.atomic
     def post(self, request, pk):
-        empresa = _get_empresa(request)
         try:
-            venta = Venta.objects.prefetch_related(
-                "detalles__producto"
-            ).get(pk=pk, tienda__empresa=empresa)
+            qs    = Venta.objects.prefetch_related("detalles__producto")
+            venta = qs.get(pk=pk) if es_superadmin(request) \
+                else qs.get(pk=pk, tienda__empresa=get_empresa(request))
         except Venta.DoesNotExist:
             return Response({"error": "Venta no encontrada."}, status=404)
 
         if venta.estado == "anulada":
-            return Response({"error": "Esta venta ya está anulada."}, status=400)
+            return Response(
+                {"error": "Esta venta ya está anulada."}, status=400)
 
         for detalle in venta.detalles.all():
             inv, _ = Inventario.objects.get_or_create(
                 producto=detalle.producto, tienda=venta.tienda,
-                defaults={"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0}
+                defaults={"stock_actual": 0,
+                          "stock_minimo": 0, "stock_maximo": 0}
             )
             inv.stock_actual += detalle.cantidad
             inv.save()
@@ -209,33 +202,38 @@ class AnularVentaView(APIView):
         })
 
 
-# ── Disponibilidad para devolución ─────────────────────────────
-
+# ── Disponibilidad para devolución ────────────────────────
 class VentaDisponibleDevolucionView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        empresa = _get_empresa(request)
         try:
-            venta = Venta.objects.prefetch_related(
-                "detalles__producto"
-            ).get(pk=pk, tienda__empresa=empresa)
+            qs    = Venta.objects.prefetch_related("detalles__producto")
+            venta = qs.get(pk=pk) if es_superadmin(request) \
+                else qs.get(pk=pk, tienda__empresa=get_empresa(request))
         except Venta.DoesNotExist:
-            return Response({"error": "Venta no encontrada."}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"error": "Venta no encontrada."},
+                status=status.HTTP_404_NOT_FOUND)
 
         if venta.estado == "anulada":
-            return Response({"error": "La venta está anulada."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "La venta está anulada."},
+                status=status.HTTP_400_BAD_REQUEST)
 
         if (request.user.rol in ("supervisor", "cajero")
                 and hasattr(request.user, "tienda_id")
                 and venta.tienda_id != request.user.tienda_id):
-            return Response({"error": "Sin permiso para ver esta venta."}, status=status.HTTP_403_FORBIDDEN)
+            return Response(
+                {"error": "Sin permiso para ver esta venta."},
+                status=status.HTTP_403_FORBIDDEN)
 
         ya_devuelto = {
             dd["producto_id"]: dd["total"]
             for dd in (
                 DetalleDevolucion.objects
-                .filter(devolucion__venta=venta, devolucion__estado="procesada")
+                .filter(devolucion__venta=venta,
+                        devolucion__estado="procesada")
                 .values("producto_id")
                 .annotate(total=Sum("cantidad"))
             )
@@ -265,9 +263,7 @@ class VentaDisponibleDevolucionView(APIView):
         })
 
 
-# ── Cambio POS ─────────────────────────────────────────────────
-# NEW — toda la lógica vive en CambioPOSSerializer
-
+# ── Cambio POS ────────────────────────────────────────────
 class CambioPOSView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -277,7 +273,9 @@ class CambioPOSView(APIView):
             context={"request": request},
         )
         if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                serializer.errors,
+                status=status.HTTP_400_BAD_REQUEST)
 
         venta = serializer.save()
 

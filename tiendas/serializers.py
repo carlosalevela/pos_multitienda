@@ -4,24 +4,36 @@ from .models import Tienda
 
 class TiendaSerializer(serializers.ModelSerializer):
     total_empleados = serializers.SerializerMethodField()
+    empresa_nombre = serializers.CharField(source="empresa.nombre", read_only=True)
 
     class Meta:
-        model  = Tienda
+        model = Tienda
         fields = [
-            "id", "nombre", "direccion", "telefono",
-            "ciudad", "nit", "activo",
-            "empresa",                  # ✅ visible para el frontend
-            "total_empleados", "created_at"
+            "id",
+            "nombre",
+            "direccion",
+            "telefono",
+            "ciudad",
+            "nit",
+            "activo",
+            "empresa",
+            "empresa_nombre",
+            "total_empleados",
+            "created_at",
         ]
-        read_only_fields = ["id", "created_at", "empresa"]  # ✅ no modificable desde el body
+        read_only_fields = [
+            "id",
+            "created_at",
+            "empresa",
+            "empresa_nombre",
+            "total_empleados",
+        ]
 
     def get_total_empleados(self, obj):
         return obj.empleados.filter(activo=True).count()
 
 
 class TiendaSimpleSerializer(serializers.ModelSerializer):
-    """Versión liviana para dropdowns"""
     class Meta:
-        model  = Tienda
+        model = Tienda
         fields = ["id", "nombre", "ciudad"]
-        # empresa no se expone en dropdowns — no hace falta

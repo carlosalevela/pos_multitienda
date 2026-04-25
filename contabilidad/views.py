@@ -9,11 +9,12 @@ from django.db.models import Sum, Count
 from django.db.models.functions import TruncDate, TruncMonth
 from django.utils import timezone
 
+from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa
 from .models import Gasto
 from .serializers import GastoSerializer
 from ventas.models import Venta
 from caja.models import SesionCaja
-from devoluciones.models import Devolucion  # ✅ NUEVO
+from devoluciones.models import Devolucion
 
 
 CATEGORIAS_SOLO_ADMIN = {
@@ -22,38 +23,26 @@ CATEGORIAS_SOLO_ADMIN = {
 }
 
 
-# ── Permisos ───────────────────────────────────────────────────
-
-class EsAdminOSupervisor(IsAuthenticated):
-    def has_permission(self, request, view):
-        return super().has_permission(request, view) and \
-               request.user.rol in ["admin", "supervisor"]
-
-
+# ── Permiso local ─────────────────────────────────────────
+# EsAdminOSupervisor viene de core.permissions
+# Este permiso incluye cajero y no existe en core
 class EsAdminSupervisorOCajero(IsAuthenticated):
     def has_permission(self, request, view):
         return super().has_permission(request, view) and \
-               request.user.rol in ["admin", "supervisor", "cajero"]
+               request.user.rol in [
+                   "superadmin", "admin", "supervisor", "cajero"]
 
 
-# ── Helper empresa ─────────────────────────────────────────────
-
-def _get_empresa(request):
-    return request.user.empresa
-
-
-# ── Helper devoluciones ────────────────────────────────────────
-
-def _devoluciones_qs_base(empresa):
-    """QuerySet base de devoluciones procesadas scoped a empresa."""
-    return Devolucion.objects.filter(
-        estado="procesada",
-        tienda__empresa=empresa,
-    )
+# ── Helper devoluciones ───────────────────────────────────
+def _devoluciones_qs_base(empresa=None):
+    """QuerySet base de devoluciones procesadas, opcionalmente scoped."""
+    qs = Devolucion.objects.filter(estado="procesada")
+    if empresa:
+        qs = qs.filter(tienda__empresa=empresa)
+    return qs
 
 
-# ── Gastos ─────────────────────────────────────────────────────
-
+# ── Gastos ────────────────────────────────────────────────
 class GastoListCreateView(generics.ListCreateAPIView):
     serializer_class = GastoSerializer
 
@@ -63,14 +52,20 @@ class GastoListCreateView(generics.ListCreateAPIView):
         return [EsAdminSupervisorOCajero()]
 
     def get_queryset(self):
-        empresa = _get_empresa(self.request)
         qs = Gasto.objects.select_related(
-            "tienda", "empleado", "sesion_caja"
-        ).filter(tienda__empresa=empresa)
-        user = self.request.user
+            "tienda", "empleado", "sesion_caja")
 
+        if es_superadmin(self.request):
+            empresa_id = self.request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+
+        user = self.request.user
         if user.rol == 'cajero':
-            fecha = self.request.query_params.get("fecha") or str(timezone.now().date())
+            fecha = (self.request.query_params.get("fecha") or
+                     str(timezone.now().date()))
             return qs.filter(
                 tienda_id=user.tienda_id,
                 created_at__date=fecha,
@@ -106,16 +101,21 @@ class GastoListCreateView(generics.ListCreateAPIView):
         return context
 
     def perform_create(self, serializer):
-        empresa   = _get_empresa(self.request)
         tienda_id = self.request.data.get("tienda")
 
-        sesion = SesionCaja.objects.filter(
-            tienda_id=tienda_id,
-            tienda__empresa=empresa,
-            estado="abierta",
-        ).first()
+        if es_superadmin(self.request):
+            empresa = None   # superadmin no tiene empresa propia
+        else:
+            empresa = get_empresa(self.request)
 
-        categoria           = self.request.data.get("categoria", "").lower().strip()
+        sesion_filtro = {"tienda_id": tienda_id, "estado": "abierta"}
+        if empresa:
+            sesion_filtro["tienda__empresa"] = empresa
+
+        sesion = SesionCaja.objects.filter(**sesion_filtro).first()
+
+        categoria           = self.request.data.get(
+            "categoria", "").lower().strip()
         visibilidad_enviada = self.request.data.get("visibilidad", "")
         rol                 = self.request.user.rol
 
@@ -140,79 +140,81 @@ class GastoDetailView(generics.RetrieveDestroyAPIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
+        if es_superadmin(self.request):
+            return Gasto.objects.all()
         return Gasto.objects.filter(
-            tienda__empresa=_get_empresa(self.request)
-        )
+            tienda__empresa=get_empresa(self.request))
 
 
-# ── Resumen diario ─────────────────────────────────────────────
-
+# ── Resumen diario ────────────────────────────────────────
 class ResumenDiarioView(APIView):
     permission_classes = [EsAdminSupervisorOCajero]
 
     def get(self, request):
-        empresa   = _get_empresa(request)
         fecha     = request.query_params.get("fecha") or timezone.now().date()
         tienda_id = request.query_params.get("tienda_id")
 
         if request.user.rol == "cajero":
             tienda_id = str(request.user.tienda_id)
 
+        # base querysets
         ventas_qs = Venta.objects.filter(
-            estado="completada",
-            created_at__date=fecha,
-            tienda__empresa=empresa,
-        )
-        gastos_qs = Gasto.objects.filter(
-            created_at__date=fecha,
-            tienda__empresa=empresa,
-        )
-        # ✅ NUEVO
-        devoluciones_qs = _devoluciones_qs_base(empresa).filter(
-            created_at__date=fecha,
-        )
+            estado="completada", created_at__date=fecha)
+        gastos_qs = Gasto.objects.filter(created_at__date=fecha)
+        dev_qs    = Devolucion.objects.filter(
+            estado="procesada", created_at__date=fecha)
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                ventas_qs = ventas_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                gastos_qs = gastos_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                dev_qs    = dev_qs.filter(
+                    tienda__empresa_id=empresa_id)
+        else:
+            empresa   = get_empresa(request)
+            ventas_qs = ventas_qs.filter(tienda__empresa=empresa)
+            gastos_qs = gastos_qs.filter(tienda__empresa=empresa)
+            dev_qs    = dev_qs.filter(tienda__empresa=empresa)
 
         if request.user.rol == "cajero":
-            gastos_qs       = gastos_qs.filter(visibilidad='todos')
-            devoluciones_qs = devoluciones_qs.filter(
+            gastos_qs = gastos_qs.filter(visibilidad='todos')
+            dev_qs    = dev_qs.filter(
                 tienda_id=request.user.tienda_id)
 
         if tienda_id:
-            ventas_qs       = ventas_qs.filter(tienda_id=tienda_id)
-            gastos_qs       = gastos_qs.filter(tienda_id=tienda_id)
-            devoluciones_qs = devoluciones_qs.filter(tienda_id=tienda_id)  # ✅
+            ventas_qs = ventas_qs.filter(tienda_id=tienda_id)
+            gastos_qs = gastos_qs.filter(tienda_id=tienda_id)
+            dev_qs    = dev_qs.filter(tienda_id=tienda_id)
 
-        total_ventas = ventas_qs.aggregate(
+        total_ventas      = ventas_qs.aggregate(
             t=Sum("total"))["t"] or Decimal("0")
-        total_gastos = gastos_qs.aggregate(
+        total_gastos      = gastos_qs.aggregate(
             t=Sum("monto"))["t"] or Decimal("0")
-        # ✅ NUEVO
-        total_devoluciones = devoluciones_qs.aggregate(
+        total_devoluciones = dev_qs.aggregate(
             t=Sum("total_devuelto"))["t"] or Decimal("0")
 
-        por_metodo = ventas_qs.values("metodo_pago").annotate(
-            total=Sum("total"), cantidad=Count("id")
-        )
-        # ✅ NUEVO: devoluciones agrupadas por método
-        dev_por_metodo = devoluciones_qs.values(
-            "metodo_devolucion"
-        ).annotate(
-            total=Sum("total_devuelto"),
-            cantidad=Count("id"),
-        )
+        por_metodo     = ventas_qs.values("metodo_pago").annotate(
+            total=Sum("total"), cantidad=Count("id"))
+        dev_por_metodo = dev_qs.values("metodo_devolucion").annotate(
+            total=Sum("total_devuelto"), cantidad=Count("id"))
 
         gastos_por_categoria = []
-        if request.user.rol != "cajero":
+        if request.user.rol not in ("cajero",):
             gastos_por_categoria = [
                 {
                     "categoria": g["categoria"],
                     "total":     float(g["total"]),
                     "cantidad":  g["cantidad"],
                 }
-                for g in gastos_qs
+                for g in (
+                    gastos_qs
                     .values("categoria")
                     .annotate(total=Sum("monto"), cantidad=Count("id"))
                     .order_by("-total")
+                )
             ]
 
         return Response({
@@ -220,9 +222,8 @@ class ResumenDiarioView(APIView):
             "total_ventas":       float(total_ventas),
             "num_ventas":         ventas_qs.count(),
             "total_gastos":       float(total_gastos),
-            # ✅ NUEVO
             "total_devoluciones": float(total_devoluciones),
-            "num_devoluciones":   devoluciones_qs.count(),
+            "num_devoluciones":   dev_qs.count(),
             "total_neto":         float(total_ventas - total_devoluciones),
             "utilidad_bruta":     float(
                 total_ventas - total_devoluciones - total_gastos),
@@ -234,7 +235,6 @@ class ResumenDiarioView(APIView):
                 }
                 for v in por_metodo
             ],
-            # ✅ NUEVO
             "devoluciones_por_metodo": [
                 {
                     "metodo":   d["metodo_devolucion"],
@@ -247,71 +247,76 @@ class ResumenDiarioView(APIView):
         })
 
 
-# ── Resumen mensual ────────────────────────────────────────────
-
+# ── Resumen mensual ───────────────────────────────────────
 class ResumenMensualView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        empresa   = _get_empresa(request)
-        anio      = request.query_params.get("anio", str(timezone.now().year))
-        mes       = request.query_params.get("mes",  str(timezone.now().month))
+        anio      = request.query_params.get(
+            "anio", str(timezone.now().year))
+        mes       = request.query_params.get(
+            "mes", str(timezone.now().month))
         tienda_id = request.query_params.get("tienda_id")
 
         ventas_qs = Venta.objects.filter(
             estado="completada",
             created_at__year=anio,
             created_at__month=mes,
-            tienda__empresa=empresa,
         )
         gastos_qs = Gasto.objects.filter(
-            created_at__year=anio,
-            created_at__month=mes,
-            tienda__empresa=empresa,
-        )
-        # ✅ NUEVO
-        devoluciones_qs = _devoluciones_qs_base(empresa).filter(
+            created_at__year=anio, created_at__month=mes)
+        dev_qs    = Devolucion.objects.filter(
+            estado="procesada",
             created_at__year=anio,
             created_at__month=mes,
         )
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                ventas_qs = ventas_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                gastos_qs = gastos_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                dev_qs    = dev_qs.filter(
+                    tienda__empresa_id=empresa_id)
+        else:
+            empresa   = get_empresa(request)
+            ventas_qs = ventas_qs.filter(tienda__empresa=empresa)
+            gastos_qs = gastos_qs.filter(tienda__empresa=empresa)
+            dev_qs    = dev_qs.filter(tienda__empresa=empresa)
 
         if tienda_id:
-            ventas_qs       = ventas_qs.filter(tienda_id=tienda_id)
-            gastos_qs       = gastos_qs.filter(tienda_id=tienda_id)
-            devoluciones_qs = devoluciones_qs.filter(tienda_id=tienda_id)  # ✅
+            ventas_qs = ventas_qs.filter(tienda_id=tienda_id)
+            gastos_qs = gastos_qs.filter(tienda_id=tienda_id)
+            dev_qs    = dev_qs.filter(tienda_id=tienda_id)
 
-        total_mes  = ventas_qs.aggregate(
+        total_mes        = ventas_qs.aggregate(
             t=Sum("total"))["t"] or Decimal("0")
-        gastos_mes = gastos_qs.aggregate(
+        gastos_mes       = gastos_qs.aggregate(
             t=Sum("monto"))["t"] or Decimal("0")
-        # ✅ NUEVO
-        devoluciones_mes = devoluciones_qs.aggregate(
+        devoluciones_mes = dev_qs.aggregate(
             t=Sum("total_devuelto"))["t"] or Decimal("0")
 
         por_dia = (
-            ventas_qs
-            .annotate(dia=TruncDate("created_at"))
+            ventas_qs.annotate(dia=TruncDate("created_at"))
             .values("dia")
             .annotate(total=Sum("total"), cantidad=Count("id"))
             .order_by("dia")
         )
         gastos_por_categoria = (
-            gastos_qs
-            .values("categoria")
+            gastos_qs.values("categoria")
             .annotate(total=Sum("monto"))
             .order_by("-total")
         )
         gastos_por_dia = (
-            gastos_qs
-            .annotate(dia=TruncDate("created_at"))
+            gastos_qs.annotate(dia=TruncDate("created_at"))
             .values("dia")
             .annotate(total=Sum("monto"))
             .order_by("dia")
         )
-        # ✅ NUEVO: devoluciones por día del mes
         devoluciones_por_dia = (
-            devoluciones_qs
-            .annotate(dia=TruncDate("created_at"))
+            dev_qs.annotate(dia=TruncDate("created_at"))
             .values("dia")
             .annotate(total=Sum("total_devuelto"), cantidad=Count("id"))
             .order_by("dia")
@@ -322,7 +327,6 @@ class ResumenMensualView(APIView):
             "mes":                int(mes),
             "total_ventas":       float(total_mes),
             "total_gastos":       float(gastos_mes),
-            # ✅ NUEVO
             "total_devoluciones": float(devoluciones_mes),
             "total_neto":         float(total_mes - devoluciones_mes),
             "utilidad_bruta":     float(
@@ -343,7 +347,6 @@ class ResumenMensualView(APIView):
                 {"dia": str(g["dia"]), "total": float(g["total"])}
                 for g in gastos_por_dia
             ],
-            # ✅ NUEVO
             "devoluciones_por_dia": [
                 {
                     "dia":      str(d["dia"]),
@@ -355,14 +358,13 @@ class ResumenMensualView(APIView):
         })
 
 
-# ── Top productos ──────────────────────────────────────────────
-
+# ── Top productos ─────────────────────────────────────────
 class ProductosMasVendidosView(APIView):
     permission_classes = [EsAdminSupervisorOCajero]
 
     def get(self, request):
         from ventas.models import DetalleVenta
-        empresa   = _get_empresa(request)
+
         tienda_id = request.query_params.get("tienda_id")
         fecha_ini = request.query_params.get("fecha_ini")
         fecha_fin = request.query_params.get("fecha_fin")
@@ -370,18 +372,30 @@ class ProductosMasVendidosView(APIView):
         if request.user.rol == "cajero":
             tienda_id = str(request.user.tienda_id)
 
-        qs = DetalleVenta.objects.filter(
-            venta__estado="completada",
-            venta__tienda__empresa=empresa,
-        )
-        if tienda_id: qs = qs.filter(venta__tienda_id=tienda_id)
-        if fecha_ini: qs = qs.filter(venta__created_at__date__gte=fecha_ini)
-        if fecha_fin: qs = qs.filter(venta__created_at__date__lte=fecha_fin)
+        qs = DetalleVenta.objects.filter(venta__estado="completada")
 
-        top = qs.values("producto__nombre").annotate(
-            total_cantidad=Sum("cantidad"),
-            total_ingresos=Sum("subtotal"),
-        ).order_by("-total_cantidad")[:10]
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(venta__tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(
+                venta__tienda__empresa=get_empresa(request))
+
+        if tienda_id: qs = qs.filter(venta__tienda_id=tienda_id)
+        if fecha_ini: qs = qs.filter(
+            venta__created_at__date__gte=fecha_ini)
+        if fecha_fin: qs = qs.filter(
+            venta__created_at__date__lte=fecha_fin)
+
+        top = (
+            qs.values("producto__nombre")
+            .annotate(
+                total_cantidad=Sum("cantidad"),
+                total_ingresos=Sum("subtotal"),
+            )
+            .order_by("-total_cantidad")[:10]
+        )
 
         return Response([
             {
@@ -393,41 +407,46 @@ class ProductosMasVendidosView(APIView):
         ])
 
 
-# ── Resumen anual ──────────────────────────────────────────────
-
+# ── Resumen anual ─────────────────────────────────────────
 class ResumenAnualView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        empresa   = _get_empresa(request)
-        anio      = int(request.query_params.get("anio", timezone.now().year))
+        anio      = int(request.query_params.get(
+            "anio", timezone.now().year))
         tienda_id = request.query_params.get("tienda_id")
 
         ventas_qs = Venta.objects.filter(
-            estado="completada",
-            created_at__year=anio,
-            tienda__empresa=empresa,
-        )
-        gastos_qs = Gasto.objects.filter(
-            created_at__year=anio,
-            tienda__empresa=empresa,
-        )
-        # ✅ NUEVO
-        devoluciones_qs = _devoluciones_qs_base(empresa).filter(
-            created_at__year=anio,
-        )
+            estado="completada", created_at__year=anio)
+        gastos_qs = Gasto.objects.filter(created_at__year=anio)
+        dev_qs    = Devolucion.objects.filter(
+            estado="procesada", created_at__year=anio)
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                ventas_qs = ventas_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                gastos_qs = gastos_qs.filter(
+                    tienda__empresa_id=empresa_id)
+                dev_qs    = dev_qs.filter(
+                    tienda__empresa_id=empresa_id)
+        else:
+            empresa   = get_empresa(request)
+            ventas_qs = ventas_qs.filter(tienda__empresa=empresa)
+            gastos_qs = gastos_qs.filter(tienda__empresa=empresa)
+            dev_qs    = dev_qs.filter(tienda__empresa=empresa)
 
         if tienda_id:
-            ventas_qs       = ventas_qs.filter(tienda_id=tienda_id)
-            gastos_qs       = gastos_qs.filter(tienda_id=tienda_id)
-            devoluciones_qs = devoluciones_qs.filter(tienda_id=tienda_id)  # ✅
+            ventas_qs = ventas_qs.filter(tienda_id=tienda_id)
+            gastos_qs = gastos_qs.filter(tienda_id=tienda_id)
+            dev_qs    = dev_qs.filter(tienda_id=tienda_id)
 
         total_anio        = ventas_qs.aggregate(
             t=Sum("total"))["t"] or Decimal("0")
         gastos_anio       = gastos_qs.aggregate(
             t=Sum("monto"))["t"] or Decimal("0")
-        # ✅ NUEVO
-        devoluciones_anio = devoluciones_qs.aggregate(
+        devoluciones_anio = dev_qs.aggregate(
             t=Sum("total_devuelto"))["t"] or Decimal("0")
 
         por_mes_ventas = {
@@ -444,10 +463,9 @@ class ResumenAnualView(APIView):
                 .values("mes")
                 .annotate(total=Sum("monto"))
         }
-        # ✅ NUEVO
         por_mes_devoluciones = {
             d["mes"].month: float(d["total"])
-            for d in devoluciones_qs
+            for d in dev_qs
                 .annotate(mes=TruncMonth("created_at"))
                 .values("mes")
                 .annotate(total=Sum("total_devuelto"))
@@ -464,15 +482,15 @@ class ResumenAnualView(APIView):
             ventas_m = float(
                 por_mes_ventas.get(m, {}).get("total", 0) or 0)
             gastos_m = por_mes_gastos.get(m, 0)
-            dev_m    = por_mes_devoluciones.get(m, 0)  # ✅ NUEVO
+            dev_m    = por_mes_devoluciones.get(m, 0)
             meses.append({
                 "mes":          m,
                 "nombre":       MESES[m],
                 "ventas":       ventas_m,
-                "devoluciones": dev_m,               # ✅ NUEVO
-                "neto":         ventas_m - dev_m,    # ✅ NUEVO
+                "devoluciones": dev_m,
+                "neto":         ventas_m - dev_m,
                 "gastos":       gastos_m,
-                "utilidad":     ventas_m - dev_m - gastos_m,  # ✅ corregida
+                "utilidad":     ventas_m - dev_m - gastos_m,
                 "cantidad":     por_mes_ventas.get(m, {}).get(
                     "cantidad", 0) or 0,
             })
@@ -481,7 +499,6 @@ class ResumenAnualView(APIView):
             "anio":               anio,
             "total_ventas":       float(total_anio),
             "total_gastos":       float(gastos_anio),
-            # ✅ NUEVO
             "total_devoluciones": float(devoluciones_anio),
             "total_neto":         float(total_anio - devoluciones_anio),
             "utilidad_bruta":     float(
@@ -490,13 +507,11 @@ class ResumenAnualView(APIView):
         })
 
 
-# ── Gastos por rango ───────────────────────────────────────────
-
+# ── Gastos por rango ──────────────────────────────────────
 class GastosResumenRangoView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        empresa   = _get_empresa(request)
         fecha_ini = request.query_params.get("fecha_ini")
         fecha_fin = request.query_params.get("fecha_fin")
         tienda_id = request.query_params.get("tienda_id")
@@ -510,8 +525,14 @@ class GastosResumenRangoView(APIView):
         qs = Gasto.objects.filter(
             created_at__date__gte=fecha_ini,
             created_at__date__lte=fecha_fin,
-            tienda__empresa=empresa,
         )
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(tienda__empresa=get_empresa(request))
 
         if tienda_id: qs = qs.filter(tienda_id=tienda_id)
         if categoria: qs = qs.filter(categoria__iexact=categoria)

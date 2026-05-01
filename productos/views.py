@@ -9,11 +9,11 @@ from django.db.models import Q, F, Sum
 from decimal import Decimal
 
 from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
-from .models import Categoria, Producto, Inventario, MovimientoInventario
+from .models import (Categoria, Producto, Inventario, MovimientoInventario, generar_codigo_barras_interno)
 from .serializers import (
     CategoriaSerializer, ProductoSerializer, ProductoSimpleSerializer,
     InventarioSerializer, AjusteInventarioSerializer,
-    MovimientoInventarioSerializer,
+    MovimientoInventarioSerializer, ImportarProductoItemSerializer
 )
 
 
@@ -440,3 +440,124 @@ class TopProductosView(APIView):
             }
             for r in resultado
         ])
+
+# ── Importar productos desde Excel (batch) ────────────────
+class ImportarProductosView(APIView):
+    permission_classes = [EsAdminOSupervisor]
+
+    def post(self, request):
+        # Resolver empresa
+        if es_superadmin(request):
+            empresa_id = request.data.get("empresa")
+            if not empresa_id:
+                return Response(
+                    {"detail": "El superadmin debe especificar una empresa."},
+                    status=status.HTTP_400_BAD_REQUEST)
+            from empresas.models import Empresa
+            try:
+                empresa = Empresa.objects.get(id=empresa_id)
+            except Empresa.DoesNotExist:
+                return Response(
+                    {"detail": "Empresa no encontrada."},
+                    status=status.HTTP_404_NOT_FOUND)
+        else:
+            empresa = get_empresa(request)
+
+        # Resolver tienda
+        tienda_id = request.data.get("tienda_id")
+        tienda    = None
+        if tienda_id:
+            from tiendas.models import Tienda
+            try:
+                tienda = Tienda.objects.get(id=tienda_id, empresa=empresa)
+            except Tienda.DoesNotExist:
+                return Response(
+                    {"detail": "La tienda no pertenece a esta empresa."},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+        # Validar lista
+        productos_data = request.data.get("productos", [])
+        if not isinstance(productos_data, list) or len(productos_data) == 0:
+            return Response(
+                {"detail": "El campo 'productos' debe ser una lista no vacía."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        # Procesar cada producto con su propio savepoint
+        creados    = 0
+        fallidos   = 0
+        resultados = []
+
+        for i, item in enumerate(productos_data):
+            fila = i + 2  # +2 porque fila 1 = encabezados Excel
+
+            # Validar con serializer
+            ser = ImportarProductoItemSerializer(data=item)
+            if not ser.is_valid():
+                fallidos += 1
+                resultados.append({
+                    "fila":    fila,
+                    "nombre":  item.get("nombre", "(vacío)"),
+                    "success": False,
+                    "error":   str(ser.errors),
+                })
+                continue
+
+            d = ser.validated_data
+            try:
+                with transaction.atomic():
+                    categoria = _resolver_categoria(
+                        d.get("categoria_nombre", ""), empresa)
+
+                    # Código de barras: autogenerar si viene vacío
+                    codigo = (d.get("codigo_barras") or "").strip() or None
+                    if not codigo:
+                        codigo = generar_codigo_barras_interno()
+
+                    producto = Producto.objects.create(
+                        empresa         = empresa,
+                        categoria       = categoria,
+                        nombre          = d["nombre"],
+                        descripcion     = d.get("descripcion", ""),
+                        codigo_barras   = codigo,
+                        precio_compra   = d.get("precio_compra", 0),
+                        precio_venta    = d.get("precio_venta",  0),
+                        unidad_medida   = "unidad",
+                        aplica_impuesto = False,
+                    )
+
+                    if tienda:
+                        Inventario.objects.update_or_create(
+                            producto = producto,
+                            tienda   = tienda,
+                            defaults = {
+                                "stock_actual": d.get("stock_actual", 0),
+                                "stock_minimo": d.get("stock_minimo", 0),
+                            },
+                        )
+
+                creados += 1
+                resultados.append({
+                    "fila":    fila,
+                    "nombre":  d["nombre"],
+                    "success": True,
+                    "id":      producto.id,
+                })
+
+            except Exception as e:
+                fallidos += 1
+                msg = str(e)
+                if "unique" in msg.lower():
+                    msg = f"Código de barras '{codigo}' ya existe."
+                resultados.append({
+                    "fila":    fila,
+                    "nombre":  d["nombre"],
+                    "success": False,
+                    "error":   msg,
+                })
+
+        return Response({
+            "creados":    creados,
+            "fallidos":   fallidos,
+            "total":      len(productos_data),
+            "resultados": resultados,
+        }, status=status.HTTP_207_MULTI_STATUS)

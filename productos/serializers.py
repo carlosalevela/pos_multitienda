@@ -123,3 +123,22 @@ class MovimientoInventarioSerializer(serializers.ModelSerializer):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
+    
+# ── Serializer para importación batch desde Excel ─────────
+class ImportarProductoItemSerializer(serializers.Serializer):
+    """Valida cada fila del Excel antes de crear el producto."""
+    nombre          = serializers.CharField(max_length=150)
+    descripcion     = serializers.CharField(
+        required=False, allow_blank=True, default='')
+    codigo_barras   = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True, default=None)
+    categoria_nombre = serializers.CharField(
+        required=False, allow_blank=True, default='')
+    precio_venta    = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    precio_compra   = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    stock_actual    = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    stock_minimo    = serializers.DecimalField(
+        max_digits=12, decimal_places=2, default=0)

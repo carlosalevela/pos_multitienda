@@ -1,13 +1,14 @@
 from django.db import models
+from tiendas.models import  Tienda
 
 
 class Cliente(models.Model):
-    empresa = models.ForeignKey(
-        "empresas.Empresa",
-        on_delete=models.CASCADE,
-        null=False,                          # ✅ Obligatorio
-        blank=False,
-        related_name="clientes"
+    empresa  = models.ForeignKey('empresas.Empresa', on_delete=models.CASCADE)
+    tienda   = models.ForeignKey(           # ✅ nuevo
+        Tienda,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='clientes'
     )
     nombre     = models.CharField(max_length=100)
     apellido   = models.CharField(max_length=100, blank=True)

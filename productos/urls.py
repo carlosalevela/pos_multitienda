@@ -4,7 +4,7 @@ from .views import (
     ProductoListCreateView, ProductoDetailView,
     BuscarProductoPOSView, InventarioListView,
     AjustarInventarioView, MovimientosProductoView,
-    TopProductosView,ReactivarProductoView
+    TopProductosView,ReactivarProductoView,ImportarProductosView
 )
 
 urlpatterns = [
@@ -14,8 +14,9 @@ urlpatterns = [
 
     # Productos
     path("",                     ProductoListCreateView.as_view(),  name="productos"),
-    path("<int:pk>/",            ProductoDetailView.as_view(),      name="producto_detail"),
+    path("importar/",  ImportarProductosView.as_view(),  name="importar_productos"),
     path("buscar/",              BuscarProductoPOSView.as_view(),   name="buscar_producto"),
+    path("<int:pk>/",            ProductoDetailView.as_view(),      name="producto_detail"),
 
     # Inventario
     path("inventario/",          InventarioListView.as_view(),      name="inventario"),

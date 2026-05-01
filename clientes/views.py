@@ -41,6 +41,11 @@ class ClienteListCreateView(generics.ListCreateAPIView):
         else:
             qs = qs.filter(empresa=get_empresa(self.request))
 
+        # ✅ Filtro por tienda
+        tienda_id = self.request.query_params.get("tienda_id")
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+
         q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(
@@ -50,17 +55,15 @@ class ClienteListCreateView(generics.ListCreateAPIView):
                 Q(telefono__icontains=q)
             )
         return qs.order_by("nombre")
-
     def perform_create(self, serializer):
         if es_superadmin(self.request):
-            empresa_id = self.request.data.get("empresa")
-            if not empresa_id:
-                from rest_framework.exceptions import PermissionDenied
-                raise PermissionDenied(
-                    "El superadmin debe especificar una empresa.")
             serializer.save()
         else:
-            serializer.save(empresa=get_empresa(self.request))
+            tienda_id = self.request.data.get("tienda")
+            serializer.save(
+                empresa   = get_empresa(self.request),
+                tienda_id = tienda_id if tienda_id else None,
+            )
 
 
 class ClienteDetailView(generics.RetrieveUpdateDestroyAPIView):

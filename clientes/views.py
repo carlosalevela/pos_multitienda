@@ -9,6 +9,7 @@ from django.db.models import Q
 from decimal import Decimal
 from django.utils import timezone
 from datetime import timedelta
+from rest_framework.exceptions import ValidationError
 
 from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa
 from productos.models import Inventario, MovimientoInventario
@@ -143,8 +144,77 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
         return qs.order_by("-created_at")
 
-    def perform_create(self, serializer):
-        serializer.save(empleado=_get_empleado(self.request))
+    @transaction.atomic
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        separado = serializer.save(empleado=_get_empleado(request))
+
+        # ── Abono inicial opcional ────────────────────────
+        abono_inicial = request.data.get('abono_inicial')
+        metodo_pago   = request.data.get('metodo_pago', 'efectivo')
+
+        en_caja = False
+
+        if abono_inicial:
+            monto = Decimal(str(abono_inicial))
+
+            if monto > 0:
+                if monto > separado.saldo_pendiente:
+                    raise ValidationError(
+                        {"abono_inicial": "El abono inicial no puede "
+                                          "superar el total del separado."}
+                    )
+
+                AbonoSeparado.objects.create(
+                    separado    = separado,
+                    empleado    = _get_empleado(request),
+                    monto       = monto,
+                    metodo_pago = metodo_pago,
+                )
+
+                separado.abono_acumulado += monto
+                separado.saldo_pendiente -= monto
+
+                if separado.saldo_pendiente <= 0:
+                    separado.estado          = 'pagado'
+                    separado.saldo_pendiente = Decimal('0')
+
+                separado.save()
+
+                # ── Registrar en caja si hay sesión abierta ──
+                from caja.models import SesionCaja, MovimientoCaja
+                sesion = SesionCaja.objects.filter(
+                    tienda_id = separado.tienda_id,
+                    estado    = 'abierta',
+                ).first()
+
+                if sesion:
+                    MovimientoCaja.objects.create(
+                        sesion        = sesion,
+                        tipo          = 'abono_separado',
+                        metodo_pago   = metodo_pago,
+                        monto         = monto,
+                        referencia_id = separado.id,
+                        empleado      = _get_empleado(request),
+                        descripcion   = (
+                            f"Abono inicial separado #{separado.id} - "
+                            f"{separado.cliente.nombre} "
+                            f"{separado.cliente.apellido}"
+                        ),
+                    )
+                    en_caja = True
+
+        headers = self.get_success_headers(serializer.data)
+        return Response(
+            {
+                **serializer.data,
+                "en_caja": en_caja,
+            },
+            status=201,
+            headers=headers,
+        )
 
 
 class SeparadoDetailView(generics.RetrieveAPIView):

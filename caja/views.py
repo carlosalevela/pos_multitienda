@@ -58,10 +58,10 @@ class AbrirCajaView(APIView):
         )
 
         return Response({
-            "detail":        "Caja abierta correctamente.",
-            "sesion_id":     sesion.id,
-            "tienda_id":     tienda_id,
-            "monto_inicial": float(monto_inicial),
+            "detail":         "Caja abierta correctamente.",
+            "sesion_id":      sesion.id,
+            "tienda_id":      tienda_id,
+            "monto_inicial":  float(monto_inicial),
             "fecha_apertura": sesion.fecha_apertura,
         }, status=201)
 
@@ -95,29 +95,44 @@ class CerrarCajaView(APIView):
         from contabilidad.models import Gasto
         from devoluciones.models import Devolucion
 
+        # ── Ventas (solo efectivo y mixto entran al cajón) ────
         total_ventas = Venta.objects.filter(
             sesion_caja=sesion, estado="completada",
             metodo_pago__in=["efectivo", "mixto"]
         ).aggregate(t=Sum("total"))["t"] or Decimal("0")
 
+        # ── Gastos (solo efectivo sale del cajón) ─────────────
         total_gastos = Gasto.objects.filter(
             sesion_caja=sesion, metodo_pago="efectivo"
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        total_abonos = sesion.movimientos.filter(
-            tipo="abono_separado", metodo_pago="efectivo",
+        # ── Abonos desglosados ────────────────────────────────
+        base_a = sesion.movimientos.filter(tipo="abono_separado")
+
+        abonos_efectivo = base_a.filter(
+            metodo_pago="efectivo"
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        abonos_tarjeta = base_a.filter(
+            metodo_pago="tarjeta"
+        ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        abonos_transferencia = base_a.filter(
+            metodo_pago="transferencia"
+        ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        abonos_total = abonos_efectivo + abonos_tarjeta + abonos_transferencia
 
         # ── Devoluciones ──────────────────────────────────────
         base_d = Devolucion.objects.filter(
             venta__sesion_caja=sesion, estado="procesada")
 
-        dev_efectivo     = base_d.filter(
+        dev_efectivo = base_d.filter(
             tipo="devolucion",
             metodo_devolucion="efectivo"
         ).aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
 
-        cambios_cobrar   = base_d.filter(
+        cambios_cobrar = base_d.filter(
             tipo="cambio", tipo_diferencia="cobrar",
             metodo_pago_diferencia="efectivo"
         ).aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
@@ -127,12 +142,15 @@ class CerrarCajaView(APIView):
             metodo_pago_diferencia="efectivo"
         ).aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
 
-        # neto = lo que salió del cajón por devoluciones
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
 
+        # ── Cuadre (solo efectivo) ────────────────────────────
         monto_sistema = (
-            sesion.monto_inicial + total_ventas + total_abonos
-            - total_gastos - neto_dev_efectivo   # ← incluye devoluciones
+            sesion.monto_inicial
+            + total_ventas
+            + abonos_efectivo        # ← solo efectivo afecta el cajón
+            - total_gastos
+            - neto_dev_efectivo
         )
         diferencia = monto_real - monto_sistema
 
@@ -145,17 +163,21 @@ class CerrarCajaView(APIView):
         sesion.save()
 
         return Response({
-            "detail":              "Caja cerrada correctamente.",
-            "sesion_id":           sesion.id,
-            "monto_inicial":       float(sesion.monto_inicial),
-            "total_ventas":        float(total_ventas),
-            "total_gastos":        float(total_gastos),
-            "total_abonos":        float(total_abonos),
-            "total_devoluciones":  float(neto_dev_efectivo),
-            "monto_final_sistema": float(monto_sistema),
-            "monto_final_real":    float(monto_real),
-            "diferencia":          float(diferencia),
-            "estado_diferencia":   "✅ Cuadre exacto" if diferencia == 0
+            "detail":                    "Caja cerrada correctamente.",
+            "sesion_id":                 sesion.id,
+            "monto_inicial":             float(sesion.monto_inicial),
+            "total_ventas":              float(total_ventas),
+            "total_gastos":              float(total_gastos),
+            # Abonos desglosados
+            "abonos_efectivo":           float(abonos_efectivo),
+            "abonos_tarjeta":            float(abonos_tarjeta),
+            "abonos_transferencia":      float(abonos_transferencia),
+            "abonos_total":              float(abonos_total),
+            "total_devoluciones":        float(neto_dev_efectivo),
+            "monto_final_sistema":       float(monto_sistema),
+            "monto_final_real":          float(monto_real),
+            "diferencia":                float(diferencia),
+            "estado_diferencia":         "✅ Cuadre exacto" if diferencia == 0
                 else f"⚠️ Faltante ${abs(diferencia)}" if diferencia < 0
                 else f"💰 Sobrante ${diferencia}",
         })
@@ -256,8 +278,8 @@ class ResumenCierreView(APIView):
             return Response(
                 {"error": "Sesión no encontrada o ya cerrada."}, status=404)
 
-        def agg(qs):   return qs.aggregate(t=Sum("monto"))["t"]  or Decimal("0")
-        def vsum(qs):  return qs.aggregate(t=Sum("total"))["t"]  or Decimal("0")
+        def agg(qs):   return qs.aggregate(t=Sum("monto"))["t"]          or Decimal("0")
+        def vsum(qs):  return qs.aggregate(t=Sum("total"))["t"]          or Decimal("0")
         def dsum(qs):  return qs.aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
         def ddsum(qs): return qs.aggregate(t=Sum("diferencia"))["t"]     or Decimal("0")
 
@@ -275,21 +297,22 @@ class ResumenCierreView(APIView):
         num_transacciones = base_v.count()
 
         # Gastos
-        g_efectivo   = agg(base_g.filter(metodo_pago="efectivo"))
-        g_otros      = agg(base_g.exclude(metodo_pago="efectivo"))
-        total_g      = g_efectivo + g_otros
+        g_efectivo     = agg(base_g.filter(metodo_pago="efectivo"))
+        g_otros        = agg(base_g.exclude(metodo_pago="efectivo"))
+        total_g        = g_efectivo + g_otros
         detalle_gastos = list(base_g.values("categoria", "monto", "metodo_pago"))
 
-        # Abonos
-        base_a        = sesion.movimientos.filter(tipo="abono_separado")
-        a_efectivo    = agg(base_a.filter(metodo_pago="efectivo"))
+        # Abonos desglosados
+        base_a          = sesion.movimientos.filter(tipo="abono_separado")
+        a_efectivo      = agg(base_a.filter(metodo_pago="efectivo"))
         a_transferencia = agg(base_a.filter(metodo_pago="transferencia"))
-        a_tarjeta     = agg(base_a.filter(metodo_pago="tarjeta"))
-        total_abonos  = a_efectivo + a_transferencia + a_tarjeta
-        num_abonos    = base_a.count()
+        a_tarjeta       = agg(base_a.filter(metodo_pago="tarjeta"))
+        total_abonos    = a_efectivo + a_transferencia + a_tarjeta
+        num_abonos      = base_a.count()
 
-        # Devoluciones ──────────────────────────────────────────
-        dev_efectivo     = dsum(base_d.filter(tipo="devolucion",metodo_devolucion="efectivo"))
+        # Devoluciones
+        dev_efectivo     = dsum(base_d.filter(
+            tipo="devolucion", metodo_devolucion="efectivo"))
         cambios_cobrar   = ddsum(base_d.filter(
             tipo="cambio", tipo_diferencia="cobrar",
             metodo_pago_diferencia="efectivo"))
@@ -299,10 +322,13 @@ class ResumenCierreView(APIView):
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
         num_devoluciones  = base_d.count()
 
-        # Monto esperado (incluye devoluciones) ─────────────────
+        # Monto esperado (solo efectivo afecta el cajón)
         monto_esperado = (
-            sesion.monto_inicial + v_efectivo + v_mixto
-            + a_efectivo - g_efectivo - neto_dev_efectivo
+            sesion.monto_inicial
+            + v_efectivo + v_mixto
+            + a_efectivo             # ← solo efectivo
+            - g_efectivo
+            - neto_dev_efectivo
         )
 
         nombre = f"{sesion.empleado.nombre} {sesion.empleado.apellido}" \
@@ -335,13 +361,13 @@ class ResumenCierreView(APIView):
                 "total":         float(total_abonos),
                 "cantidad":      num_abonos,
             },
-            "devoluciones": {                              # ← NUEVO
-                "efectivo":        float(dev_efectivo),
-                "cambios_cobrar":  float(cambios_cobrar),
-                "cambios_devolver": float(cambios_devolver),
-                "neto_efectivo":   float(neto_dev_efectivo),
-                "cantidad":        num_devoluciones,
-                "cambios_producto":  base_d.filter(   # ← NUEVO
+            "devoluciones": {
+                "efectivo":          float(dev_efectivo),
+                "cambios_cobrar":    float(cambios_cobrar),
+                "cambios_devolver":  float(cambios_devolver),
+                "neto_efectivo":     float(neto_dev_efectivo),
+                "cantidad":          num_devoluciones,
+                "cambios_producto":  base_d.filter(
                     tipo="cambio",
                     producto_reemplazo__isnull=False
                 ).count(),

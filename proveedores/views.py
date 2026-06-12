@@ -14,7 +14,8 @@ from productos.models import Inventario, MovimientoInventario, Producto, generar
 from contabilidad.models import Gasto
 
 
-# ── Proveedores ───────────────────────────────────────────
+# ── Proveedores ───────────────────────────────────────────────
+
 class ProveedorListCreateView(generics.ListCreateAPIView):
     serializer_class   = ProveedorSerializer
     permission_classes = [EsAdminOSupervisor]
@@ -36,12 +37,12 @@ class ProveedorListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         if es_superadmin(self.request):
-            empresa_id = self.request.data.get("empresa")
+            empresa_id = self.request.data.get("empresa_id")
             if not empresa_id:
                 from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied(
                     "El superadmin debe especificar una empresa.")
-            serializer.save()
+            serializer.save(empresa_id=empresa_id)
         else:
             serializer.save(empresa=get_empresa(self.request))
 
@@ -56,6 +57,16 @@ class ProveedorDetailView(generics.RetrieveUpdateDestroyAPIView):
         return Proveedor.objects.filter(
             empresa=get_empresa(self.request))
 
+    def perform_update(self, serializer):
+        if es_superadmin(self.request):
+            empresa_id = self.request.data.get("empresa_id")
+            if empresa_id:
+                serializer.save(empresa_id=empresa_id)
+            else:
+                serializer.save()
+        else:
+            serializer.save(empresa=get_empresa(self.request))
+
     def destroy(self, request, *args, **kwargs):
         proveedor = self.get_object()
         proveedor.activo = False
@@ -69,19 +80,23 @@ class ProveedorSimpleListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        qs = Proveedor.objects.filter(activo=True)
+
         if es_superadmin(self.request):
             empresa_id = self.request.query_params.get("empresa")
-            qs = Proveedor.objects.filter(activo=True)
+            tienda_id  = self.request.query_params.get("tienda_id")
             if empresa_id:
                 qs = qs.filter(empresa_id=empresa_id)
-            return qs.order_by("nombre")
-        return Proveedor.objects.filter(
-            activo=True,
-            empresa=get_empresa(self.request),
-        ).order_by("nombre")
+            elif tienda_id:
+                qs = qs.filter(empresa__tienda__id=tienda_id)
+        else:
+            qs = qs.filter(empresa=get_empresa(self.request))
+
+        return qs.order_by("nombre")
 
 
-# ── Compras ───────────────────────────────────────────────
+# ── Compras ───────────────────────────────────────────────────
+
 class CompraListCreateView(generics.ListCreateAPIView):
     serializer_class   = CompraSerializer
     permission_classes = [EsAdminOSupervisor]
@@ -105,15 +120,18 @@ class CompraListCreateView(generics.ListCreateAPIView):
         return qs.order_by("-fecha_orden")
 
     def perform_create(self, serializer):
-        empresa = get_empresa(self.request) if not es_superadmin(self.request) \
-            else None
-        ultimo = Compra.objects.filter(
-            tienda__empresa=empresa
-        ).order_by("-id").first() if empresa else \
-            Compra.objects.order_by("-id").first()
+        if es_superadmin(self.request):
+            total_compras = Compra.objects.count()
+        else:
+            empresa       = get_empresa(self.request)
+            total_compras = Compra.objects.filter(
+                tienda__empresa=empresa).count()
 
-        numero = f"OC-{(ultimo.id + 1 if ultimo else 1):05d}"
-        serializer.save(empleado=self.request.user, numero_orden=numero)
+        numero = f"OC-{(total_compras + 1):05d}"
+        serializer.save(
+            empleado=self.request.user,
+            numero_orden=numero,
+        )
 
 
 class CompraDetailView(generics.RetrieveAPIView):
@@ -137,21 +155,31 @@ class RecibirCompraView(APIView):
             qs     = Compra.objects.prefetch_related(
                 "detalles__producto", "detalles__categoria")
             compra = qs.get(pk=pk) if es_superadmin(request) \
-                else qs.get(pk=pk, tienda__empresa=get_empresa(request))
+                else qs.get(pk=pk,
+                            tienda__empresa=get_empresa(request))
         except Compra.DoesNotExist:
-            return Response({"error": "Compra no encontrada."}, status=404)
+            return Response(
+                {"error": "Compra no encontrada."}, status=404)
 
         if compra.estado == "recibida":
             return Response(
                 {"error": "Esta compra ya fue recibida."}, status=400)
         if compra.estado == "cancelada":
             return Response(
-                {"error": "No se puede recibir una compra cancelada."}, status=400)
+                {"error": "No se puede recibir una compra cancelada."},
+                status=400)
 
-        empresa = compra.tienda.empresa
+        # ✅ Leer precios enviados desde el modal de Flutter
+        # precios:        {str(detalleId): precioVenta}
+        # precios_mayoreo:{str(detalleId): precioMayoreo}
+        precios_venta   = request.data.get('precios', {})
+        precios_mayoreo = request.data.get('precios_mayoreo', {})
+
+        empresa                = compra.tienda.empresa
         productos_actualizados = []
 
         for detalle in compra.detalles.all():
+            # Crear producto nuevo si es modo libre
             if not detalle.producto:
                 nuevo_producto = Producto.objects.create(
                     nombre        = detalle.nombre_libre or "Producto sin nombre",
@@ -165,15 +193,45 @@ class RecibirCompraView(APIView):
                 detalle.producto = nuevo_producto
                 detalle.save()
 
+            # ✅ Actualizar precio_venta y precio_mayoreo del producto
+            producto        = detalle.producto
+            detalle_id_str  = str(detalle.id)
+            precio_venta_nuevo  = precios_venta.get(detalle_id_str)
+            precio_mayoreo_nuevo = precios_mayoreo.get(detalle_id_str)
+
+            campos_a_actualizar = ['precio_compra']
+            producto.precio_compra = detalle.precio_unitario  # siempre actualiza costo
+
+            if precio_venta_nuevo is not None:
+                try:
+                    producto.precio_venta = float(precio_venta_nuevo)
+                    campos_a_actualizar.append('precio_venta')
+                except (ValueError, TypeError):
+                    pass
+
+            if precio_mayoreo_nuevo is not None:
+                try:
+                    producto.precio_mayoreo = float(precio_mayoreo_nuevo)
+                    campos_a_actualizar.append('precio_mayoreo')
+                except (ValueError, TypeError):
+                    pass
+
+            producto.save(update_fields=campos_a_actualizar)
+
+            # Actualizar inventario
             inv, _ = Inventario.objects.select_for_update().get_or_create(
                 producto = detalle.producto,
                 tienda   = compra.tienda,
-                defaults = {"stock_actual": 0,
-                            "stock_minimo": 0, "stock_maximo": 0}
+                defaults = {
+                    "stock_actual": 0,
+                    "stock_minimo": 0,
+                    "stock_maximo": 0,
+                }
             )
             inv.stock_actual += detalle.cantidad
             inv.save()
 
+            # Registrar movimiento
             MovimientoInventario.objects.create(
                 producto        = detalle.producto,
                 tienda          = compra.tienda,
@@ -186,26 +244,29 @@ class RecibirCompraView(APIView):
             )
 
             productos_actualizados.append({
-                "producto":          detalle.producto.nombre,
+                "producto":          producto.nombre,
                 "es_nuevo":          detalle.nombre_libre != "",
-                "codigo_barras":     detalle.producto.codigo_barras,
+                "codigo_barras":     producto.codigo_barras,
                 "categoria":         detalle.categoria.nombre
                                      if detalle.categoria else None,
                 "cantidad_recibida": float(detalle.cantidad),
                 "stock_actual":      float(inv.stock_actual),
+                "precio_venta":      float(producto.precio_venta),      # ✅ confirma el precio guardado
+                "precio_compra":     float(producto.precio_compra),     # ✅ confirma el costo
             })
 
         compra.estado          = "recibida"
         compra.fecha_recepcion = timezone.now()
         compra.save()
 
+        # Registrar gasto contable
         if compra.total > 0:
             Gasto.objects.create(
                 tienda      = compra.tienda,
                 empleado    = request.user,
                 categoria   = 'proveedor',
-                descripcion = f'Recepción {compra.numero_orden} — '
-                              f'{compra.proveedor.nombre}',
+                descripcion = (f'Recepción {compra.numero_orden} — '
+                               f'{compra.proveedor.nombre}'),
                 monto       = compra.total,
                 metodo_pago = 'transferencia',
                 visibilidad = 'solo_admin',
@@ -223,11 +284,14 @@ class CancelarCompraView(APIView):
 
     def post(self, request, pk):
         try:
-            compra = Compra.objects.get(pk=pk) if es_superadmin(request) \
+            compra = Compra.objects.get(pk=pk) \
+                if es_superadmin(request) \
                 else Compra.objects.get(
-                    pk=pk, tienda__empresa=get_empresa(request))
+                    pk=pk,
+                    tienda__empresa=get_empresa(request))
         except Compra.DoesNotExist:
-            return Response({"error": "Compra no encontrada."}, status=404)
+            return Response(
+                {"error": "Compra no encontrada."}, status=404)
 
         if compra.estado == "recibida":
             return Response(

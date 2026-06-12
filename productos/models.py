@@ -1,8 +1,10 @@
+# productos/models.py
+
 from django.db import models
 
 
 class Categoria(models.Model):
-    empresa     = models.ForeignKey(                    # ✅ nuevo
+    empresa     = models.ForeignKey(
         "empresas.Empresa", on_delete=models.CASCADE,
         null=True, blank=True, related_name="categorias"
     )
@@ -17,35 +19,78 @@ class Categoria(models.Model):
 
 
 class Producto(models.Model):
-    empresa           = models.ForeignKey(              # ✅ nuevo
+    empresa   = models.ForeignKey(
         "empresas.Empresa", on_delete=models.CASCADE,
         null=True, blank=True, related_name="productos"
     )
-    categoria         = models.ForeignKey(Categoria, on_delete=models.SET_NULL, null=True, blank=True, related_name="productos")
-    nombre            = models.CharField(max_length=150)
-    descripcion       = models.TextField(blank=True)
-    codigo_barras     = models.CharField(max_length=50, unique=True, blank=True, null=True)
-    precio_compra     = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    precio_venta      = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    unidad_medida     = models.CharField(max_length=30, default="unidad")
-    aplica_impuesto   = models.BooleanField(default=False)
-    porcentaje_impuesto = models.DecimalField(max_digits=5, decimal_places=2, default=0)
-    activo            = models.BooleanField(default=True)
-    created_at        = models.DateTimeField(auto_now_add=True)
+    categoria = models.ForeignKey(
+        Categoria, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="productos"
+    )
+    nombre              = models.CharField(max_length=150)
+    descripcion         = models.TextField(blank=True)
+    codigo_barras       = models.CharField(
+        max_length=50, unique=True, blank=True, null=True)
+    precio_compra       = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    precio_venta        = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+
+    # ── Precio mayoreo ─────────────────────────────────────
+    precio_mayoreo      = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        null=True, blank=True,
+        help_text=(
+            "Precio al por mayor. Solo aplica si la empresa "
+            "tiene activado 'maneja_mayoreo'. Se usa cuando "
+            "la cantidad vendida es >= empresa.cantidad_mayoreo."
+        )
+    )
+
+    unidad_medida       = models.CharField(
+        max_length=30, default="unidad")
+    aplica_impuesto     = models.BooleanField(default=False)
+    porcentaje_impuesto = models.DecimalField(
+        max_digits=5, decimal_places=2, default=0)
+    activo              = models.BooleanField(default=True)
+    created_at          = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
         return self.nombre
+
+    def get_precio(self, cantidad: float = 1) -> float:
+        """
+        Retorna el precio correcto según la cantidad.
+        - Si la empresa maneja mayoreo Y la cantidad >= cantidad_mayoreo
+          Y el producto tiene precio_mayoreo → retorna precio_mayoreo.
+        - En cualquier otro caso → retorna precio_venta.
+        """
+        if (
+            self.empresa
+            and self.empresa.maneja_mayoreo
+            and self.precio_mayoreo is not None
+            and cantidad >= self.empresa.cantidad_mayoreo
+        ):
+            return float(self.precio_mayoreo)
+        return float(self.precio_venta)
 
     class Meta:
         db_table = "productos"
 
 
 class Inventario(models.Model):
-    producto     = models.ForeignKey(Producto, on_delete=models.CASCADE, related_name="inventarios")
-    tienda       = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE, related_name="inventarios")
-    stock_actual = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    stock_minimo = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    stock_maximo = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    producto     = models.ForeignKey(
+        Producto, on_delete=models.CASCADE,
+        related_name="inventarios")
+    tienda       = models.ForeignKey(
+        "tiendas.Tienda", on_delete=models.CASCADE,
+        related_name="inventarios")
+    stock_actual = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    stock_minimo = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    stock_maximo = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
     updated_at   = models.DateTimeField(auto_now=True)
 
     def __str__(self):
@@ -63,11 +108,16 @@ class MovimientoInventario(models.Model):
         ("ajuste",        "Ajuste"),
         ("transferencia", "Transferencia"),
     ]
-    producto        = models.ForeignKey(Producto, on_delete=models.CASCADE)
-    tienda          = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE)
-    empleado        = models.ForeignKey("usuarios.Empleado", on_delete=models.SET_NULL, null=True)
-    tipo            = models.CharField(max_length=20, choices=TIPO_CHOICES)
-    cantidad        = models.DecimalField(max_digits=12, decimal_places=2)
+    producto        = models.ForeignKey(
+        Producto, on_delete=models.CASCADE)
+    tienda          = models.ForeignKey(
+        "tiendas.Tienda", on_delete=models.CASCADE)
+    empleado        = models.ForeignKey(
+        "usuarios.Empleado", on_delete=models.SET_NULL, null=True)
+    tipo            = models.CharField(
+        max_length=20, choices=TIPO_CHOICES)
+    cantidad        = models.DecimalField(
+        max_digits=12, decimal_places=2)
     referencia_tipo = models.CharField(max_length=30, blank=True)
     referencia_id   = models.IntegerField(null=True, blank=True)
     observacion     = models.TextField(blank=True)

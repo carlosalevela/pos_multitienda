@@ -1,9 +1,12 @@
+# compras/serializers.py
+
 from rest_framework import serializers
 from .models import Proveedor, Compra, DetalleCompra
 from productos.models import Categoria
+from core.permissions import es_superadmin
 
 
-# ── Helper local (reemplaza resolver_categoria importado) ──────
+# ── Helper local ───────────────────────────────────────────────
 def _resolver_categoria(nombre_cat: str, empresa):
     """Busca o crea categoría DENTRO de la empresa. Nunca mezcla."""
     nombre = ' '.join((nombre_cat or '').split())
@@ -11,7 +14,7 @@ def _resolver_categoria(nombre_cat: str, empresa):
         return None
     categoria, _ = Categoria.objects.get_or_create(
         nombre__iexact=nombre,
-        empresa=empresa,                        # ✅ scoped
+        empresa=empresa,
         defaults={"nombre": nombre, "empresa": empresa},
     )
     return categoria
@@ -20,21 +23,26 @@ def _resolver_categoria(nombre_cat: str, empresa):
 # ── Proveedores ────────────────────────────────────────────────
 
 class ProveedorSerializer(serializers.ModelSerializer):
+    empresa_nombre = serializers.CharField(
+        source='empresa.nombre', read_only=True)
+
     class Meta:
         model  = Proveedor
         fields = [
             "id", "nombre", "nit", "telefono",
             "email", "direccion", "ciudad",
+            "empresa_id",
+            "empresa_nombre",
             "activo", "created_at"
         ]
-        read_only_fields = ["id", "created_at", "empresa"]     # ✅
+        read_only_fields = ["id", "created_at"]
 
 
 class ProveedorSimpleSerializer(serializers.ModelSerializer):
     class Meta:
-        model  = Proveedor
-        fields = ["id", "nombre", "nit"]
-        read_only_fields = ["empresa"]                          # ✅
+        model        = Proveedor
+        fields       = ["id", "nombre", "nit"]
+        read_only_fields = ["empresa"]
 
 
 # ── Detalle Compra ─────────────────────────────────────────────
@@ -44,7 +52,8 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
     categoria_nombre = serializers.CharField(
         source="categoria.nombre", read_only=True)
     categoria_nombre_input = serializers.CharField(
-        write_only=True, required=False, allow_blank=True, default='')
+        write_only=True, required=False,
+        allow_blank=True, default='')
 
     class Meta:
         model  = DetalleCompra
@@ -66,13 +75,14 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         return obj.nombre_libre or "Producto libre"
 
     def validate_producto(self, producto):
-        """Valida que el producto sea de la empresa del usuario."""   # ✅
         if producto is None:
             return producto
         request = self.context.get("request")
-        if request and producto.empresa != request.user.empresa:
-            raise serializers.ValidationError(
-                "El producto no pertenece a tu empresa.")
+        # ✅ superadmin no tiene empresa asignada, omitir validación
+        if request and not es_superadmin(request):
+            if producto.empresa != request.user.empresa:
+                raise serializers.ValidationError(
+                    "El producto no pertenece a tu empresa.")
         return producto
 
     def validate(self, attrs):
@@ -87,8 +97,9 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         nombre_cat = validated_data.pop("categoria_nombre_input", "") or ""
         if nombre_cat.strip():
-            empresa = self.context["request"].user.empresa      # ✅
-            validated_data["categoria"] = _resolver_categoria(nombre_cat, empresa)
+            empresa = self.context["request"].user.empresa
+            validated_data["categoria"] = _resolver_categoria(
+                nombre_cat, empresa)
         return super().create(validated_data)
 
 
@@ -96,8 +107,10 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
 
 class CompraSerializer(serializers.ModelSerializer):
     detalles         = DetalleCompraSerializer(many=True)
-    proveedor_nombre = serializers.CharField(source="proveedor.nombre", read_only=True)
-    tienda_nombre    = serializers.CharField(source="tienda.nombre",    read_only=True)
+    proveedor_nombre = serializers.CharField(
+        source="proveedor.nombre", read_only=True)
+    tienda_nombre    = serializers.CharField(
+        source="tienda.nombre",    read_only=True)
     empleado_nombre  = serializers.SerializerMethodField()
 
     class Meta:
@@ -111,7 +124,10 @@ class CompraSerializer(serializers.ModelSerializer):
             "fecha_orden", "fecha_recepcion",
             "observaciones", "detalles"
         ]
-        read_only_fields = ["id", "total", "fecha_orden", "empleado", "numero_orden"]
+        read_only_fields = [
+            "id", "total", "fecha_orden",
+            "empleado", "numero_orden"
+        ]
 
     def get_empleado_nombre(self, obj):
         if obj.empleado:
@@ -119,32 +135,39 @@ class CompraSerializer(serializers.ModelSerializer):
         return None
 
     def validate_tienda(self, tienda):
-        """Valida que la tienda sea de la empresa del usuario."""    # ✅
         request = self.context.get("request")
-        if request and tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError(
-                "La tienda no pertenece a tu empresa.")
+        # ✅ superadmin no tiene empresa asignada, omitir validación
+        if request and not es_superadmin(request):
+            if tienda.empresa != request.user.empresa:
+                raise serializers.ValidationError(
+                    "La tienda no pertenece a tu empresa.")
         return tienda
 
     def validate_proveedor(self, proveedor):
-        """Valida que el proveedor sea de la empresa del usuario.""" # ✅
         request = self.context.get("request")
-        if request and proveedor.empresa != request.user.empresa:
-            raise serializers.ValidationError(
-                "El proveedor no pertenece a tu empresa.")
+        # ✅ superadmin no tiene empresa asignada, omitir validación
+        if request and not es_superadmin(request):
+            if proveedor.empresa != request.user.empresa:
+                raise serializers.ValidationError(
+                    "El proveedor no pertenece a tu empresa.")
         return proveedor
 
     def create(self, validated_data):
         detalles_data = validated_data.pop("detalles")
-        empresa       = self.context["request"].user.empresa        # ✅
-        total  = sum(d["cantidad"] * d["precio_unitario"] for d in detalles_data)
-        compra = Compra.objects.create(total=total, **validated_data)
+        empresa       = self.context["request"].user.empresa
+        total  = sum(
+            d["cantidad"] * d["precio_unitario"]
+            for d in detalles_data)
+        compra = Compra.objects.create(
+            total=total, **validated_data)
 
         for detalle in detalles_data:
             nombre_cat = detalle.pop("categoria_nombre_input", "") or ""
             if nombre_cat.strip() and not detalle.get("categoria"):
-                detalle["categoria"] = _resolver_categoria(nombre_cat, empresa)  # ✅
-            detalle["subtotal"] = detalle["cantidad"] * detalle["precio_unitario"]
+                detalle["categoria"] = _resolver_categoria(
+                    nombre_cat, empresa)
+            detalle["subtotal"] = (
+                detalle["cantidad"] * detalle["precio_unitario"])
             DetalleCompra.objects.create(compra=compra, **detalle)
 
         return compra

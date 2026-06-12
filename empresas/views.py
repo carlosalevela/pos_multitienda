@@ -1,16 +1,18 @@
 # empresas/views.py
 
 from rest_framework import generics
+from rest_framework.views import APIView
+from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import PermissionDenied
 
 from core.permissions import EsAdmin, es_superadmin, get_empresa
 from .models import Empresa
-from .serializers import EmpresaSerializer
+from .serializers import EmpresaSerializer, EmpresaConfigMayoreoSerializer
 
 
 class EmpresaListCreateView(generics.ListCreateAPIView):
-    serializer_class = EmpresaSerializer
+    serializer_class   = EmpresaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -29,7 +31,7 @@ class EmpresaListCreateView(generics.ListCreateAPIView):
 
 
 class EmpresaDetailView(generics.RetrieveUpdateAPIView):
-    serializer_class = EmpresaSerializer
+    serializer_class   = EmpresaSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -48,3 +50,60 @@ class EmpresaDetailView(generics.RetrieveUpdateAPIView):
                     raise PermissionDenied(
                         f"No tienes permiso para modificar '{campo}'.")
         return super().update(request, *args, **kwargs)
+
+
+# ✅ Endpoint dedicado para configuración de mayoreo
+class EmpresaConfigMayoreoView(APIView):
+    """
+    GET  /api/empresas/<id>/mayoreo/  → leer config actual
+    PATCH /api/empresas/<id>/mayoreo/ → actualizar config
+    
+    Solo el admin de la empresa o superadmin puede modificarlo.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_empresa(self, request, pk):
+        """Resuelve la empresa validando permisos."""
+        if es_superadmin(request):
+            try:
+                return Empresa.objects.get(pk=pk)
+            except Empresa.DoesNotExist:
+                return None
+        # Admin normal: solo puede ver/editar su propia empresa
+        empresa = get_empresa(request)
+        if empresa and empresa.pk == int(pk):
+            return empresa
+        return None
+
+    def get(self, request, pk):
+        empresa = self._get_empresa(request, pk)
+        if not empresa:
+            raise PermissionDenied(
+                "No tienes acceso a esta empresa.")
+        serializer = EmpresaConfigMayoreoSerializer(empresa)
+        return Response(serializer.data)
+
+    def patch(self, request, pk):
+        # Solo admin o superadmin puede modificar
+        if not (es_superadmin(request) or
+                request.user.rol == 'admin'):
+            raise PermissionDenied(
+                "Solo el administrador puede modificar "
+                "la configuración de mayoreo.")
+
+        empresa = self._get_empresa(request, pk)
+        if not empresa:
+            raise PermissionDenied(
+                "No tienes acceso a esta empresa.")
+
+        serializer = EmpresaConfigMayoreoSerializer(
+            empresa,
+            data=request.data,
+            partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response({
+            "detail": "Configuración de mayoreo actualizada.",
+            **serializer.data,
+        })

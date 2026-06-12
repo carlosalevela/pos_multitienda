@@ -119,11 +119,13 @@ class VentaSerializer(serializers.ModelSerializer):
         total  = subtotal - descuento_total + impuesto_total
         vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
 
+
+
         empresa = self.context["request"].user.empresa
-        ultimo  = Venta.objects.filter(tienda__empresa=empresa).order_by("-id").first()
-        numero  = f"FAC-{(ultimo.id + 1 if ultimo else 1):06d}"
+        numero  = Venta.generar_numero_factura(empresa)
 
         venta = Venta.objects.create(
+            empresa         = empresa,
             numero_factura  = numero,
             subtotal        = subtotal,
             descuento_total = descuento_total,
@@ -250,8 +252,7 @@ class CambioPOSSerializer(serializers.Serializer):
 
             # ── PASO 1: Número de factura ─────────────────────────────────────
             empresa = request.user.empresa
-            ultimo  = Venta.objects.filter(tienda__empresa=empresa).order_by("-id").first()
-            numero  = f"FAC-{(ultimo.id + 1 if ultimo else 1):06d}"
+            numero  = Venta.generar_numero_factura(empresa)
 
             # ── PASO 2: Calcular totales de la nueva venta ────────────────────
             subtotal_venta        = Decimal("0")
@@ -276,6 +277,7 @@ class CambioPOSSerializer(serializers.Serializer):
                 else "efectivo"
             )
             venta = Venta.objects.create(
+                empresa         = empresa,
                 numero_factura  = numero,
                 tienda          = tienda,
                 sesion_caja     = sesion,

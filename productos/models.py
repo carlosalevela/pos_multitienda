@@ -29,6 +29,8 @@ class Producto(models.Model):
     )
     nombre              = models.CharField(max_length=150)
     descripcion         = models.TextField(blank=True)
+    imagen              = models.ImageField(
+        upload_to="productos/", null=True, blank=True)
     codigo_barras       = models.CharField(
         max_length=50, unique=True, blank=True, null=True)
     precio_compra       = models.DecimalField(
@@ -107,6 +109,7 @@ class MovimientoInventario(models.Model):
         ("salida",        "Salida"),
         ("ajuste",        "Ajuste"),
         ("transferencia", "Transferencia"),
+        ("dano",          "Daño / Pérdida"),
     ]
     producto        = models.ForeignKey(
         Producto, on_delete=models.CASCADE)

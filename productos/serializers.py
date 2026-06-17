@@ -17,7 +17,6 @@ class ProductoSerializer(serializers.ModelSerializer):
     stock_actual = serializers.SerializerMethodField()
     stock_minimo = serializers.SerializerMethodField()
 
-    # ✅ Campos mayoreo — read_only, informativos
     maneja_mayoreo   = serializers.SerializerMethodField()
     cantidad_mayoreo = serializers.SerializerMethodField()
 
@@ -25,14 +24,13 @@ class ProductoSerializer(serializers.ModelSerializer):
         model  = Producto
         fields = [
             "id", "nombre", "descripcion", "codigo_barras",
+            "imagen",
             "categoria", "categoria_nombre",
             "precio_compra", "precio_venta",
-            # ✅ precio mayoreo
             "precio_mayoreo",
             "unidad_medida", "aplica_impuesto",
             "porcentaje_impuesto", "activo", "created_at",
             "stock_actual", "stock_minimo",
-            # ✅ config mayoreo de la empresa (solo lectura)
             "maneja_mayoreo", "cantidad_mayoreo",
         ]
         read_only_fields = ["id", "created_at", "empresa"]
@@ -143,18 +141,30 @@ class ProductoSimpleSerializer(serializers.ModelSerializer):
 
 class InventarioSerializer(serializers.ModelSerializer):
     producto_nombre  = serializers.CharField(
-        source="producto.nombre",    read_only=True)
+        source="producto.nombre",        read_only=True)
     producto_barcode = serializers.CharField(
         source="producto.codigo_barras", read_only=True)
+    producto_imagen  = serializers.ImageField(
+        source="producto.imagen",        read_only=True)
+    precio_venta     = serializers.DecimalField(
+        source="producto.precio_venta",
+        max_digits=12, decimal_places=2, read_only=True)
+    precio_compra    = serializers.DecimalField(
+        source="producto.precio_compra",
+        max_digits=12, decimal_places=2, read_only=True)
+    categoria_nombre = serializers.CharField(
+        source="producto.categoria.nombre", read_only=True)
     tienda_nombre    = serializers.CharField(
-        source="tienda.nombre",      read_only=True)
+        source="tienda.nombre",          read_only=True)
     alerta_stock     = serializers.SerializerMethodField()
 
     class Meta:
         model  = Inventario
         fields = [
             "id", "producto", "producto_nombre",
-            "producto_barcode",
+            "producto_barcode", "producto_imagen",
+            "categoria_nombre",
+            "precio_venta", "precio_compra",
             "tienda", "tienda_nombre",
             "stock_actual", "stock_minimo", "stock_maximo",
             "alerta_stock", "updated_at",
@@ -220,3 +230,6 @@ class ImportarProductoItemSerializer(serializers.Serializer):
         max_digits=12, decimal_places=2, default=0)
     stock_minimo     = serializers.DecimalField(
         max_digits=12, decimal_places=2, default=0)
+    stock_maximo     = serializers.DecimalField(
+        max_digits=12, decimal_places=2,
+        required=False, allow_null=True, default=None)

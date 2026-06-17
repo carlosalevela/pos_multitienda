@@ -329,7 +329,8 @@ class InventarioListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Inventario.objects.select_related("producto", "tienda")
+        qs = Inventario.objects.select_related(
+            "producto", "producto__categoria", "tienda")
 
         if es_superadmin(self.request):
             empresa_id = self.request.query_params.get("empresa")
@@ -476,6 +477,81 @@ class TopProductosView(APIView):
 class ImportarProductosView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
+    _COLUMN_MAP = {
+        "nombre":           "nombre",
+        "descripcion":      "descripcion",
+        "descripción":      "descripcion",
+        "codigo_barras":    "codigo_barras",
+        "código de barras": "codigo_barras",
+        "codigo barras":    "codigo_barras",
+        "codigo":           "codigo_barras",
+        "código":           "codigo_barras",
+        "categoria":        "categoria_nombre",
+        "categoría":        "categoria_nombre",
+        "categoria_nombre": "categoria_nombre",
+        "precio_venta":     "precio_venta",
+        "precio venta":     "precio_venta",
+        "precio de venta":  "precio_venta",
+        "precio_compra":    "precio_compra",
+        "precio compra":    "precio_compra",
+        "precio de compra": "precio_compra",
+        "precio_mayoreo":   "precio_mayoreo",
+        "precio mayoreo":   "precio_mayoreo",
+        "stock_actual":     "stock_actual",
+        "stock actual":     "stock_actual",
+        "stock":            "stock_actual",
+        "existencia":       "stock_actual",
+        "stock_minimo":     "stock_minimo",
+        "stock mínimo":     "stock_minimo",
+        "stock minimo":     "stock_minimo",
+        "stock_maximo":     "stock_maximo",
+        "stock máximo":     "stock_maximo",
+        "stock maximo":     "stock_maximo",
+    }
+
+    def _parsear_excel(self, archivo):
+        import openpyxl
+        try:
+            wb = openpyxl.load_workbook(archivo, read_only=True, data_only=True)
+            ws = wb.active
+            filas = list(ws.iter_rows(values_only=True))
+        except Exception as e:
+            raise ValueError(f"No se pudo leer el archivo Excel: {e}")
+
+        if not filas:
+            raise ValueError("El archivo Excel está vacío.")
+
+        raw_headers = [
+            str(h).strip().lower() if h is not None else ""
+            for h in filas[0]
+        ]
+
+        field_indices = {}
+        for idx, h in enumerate(raw_headers):
+            campo = self._COLUMN_MAP.get(h)
+            if campo and campo not in field_indices:
+                field_indices[campo] = idx
+
+        if "nombre" not in field_indices:
+            cols = ", ".join(h for h in raw_headers if h)
+            raise ValueError(
+                f"Columna 'nombre' no encontrada. "
+                f"Columnas detectadas: {cols or '(ninguna)'}"
+            )
+
+        productos = []
+        for fila in filas[1:]:
+            if all(v is None or str(v).strip() == "" for v in fila):
+                continue
+            item = {}
+            for campo, idx in field_indices.items():
+                valor = fila[idx] if idx < len(fila) else None
+                if valor is not None and str(valor).strip() != "":
+                    item[campo] = valor
+            productos.append(item)
+
+        return productos
+
     def post(self, request):
         if es_superadmin(request):
             empresa_id = request.data.get("empresa")
@@ -505,11 +581,27 @@ class ImportarProductosView(APIView):
                     {"detail": "La tienda no pertenece a esta empresa."},
                     status=status.HTTP_400_BAD_REQUEST)
 
-        productos_data = request.data.get("productos", [])
-        if not isinstance(productos_data, list) or \
-                len(productos_data) == 0:
+        # ── Origen de datos: archivo Excel o JSON ──────────
+        archivo = request.FILES.get("archivo")
+        if archivo:
+            nombre_archivo = archivo.name.lower()
+            if not (nombre_archivo.endswith(".xlsx") or nombre_archivo.endswith(".xls")):
+                return Response(
+                    {"detail": "Solo se aceptan archivos .xlsx o .xls."},
+                    status=status.HTTP_400_BAD_REQUEST)
+            try:
+                productos_data = self._parsear_excel(archivo)
+            except ValueError as e:
+                return Response(
+                    {"detail": str(e)},
+                    status=status.HTTP_400_BAD_REQUEST)
+        else:
+            productos_data = request.data.get("productos", [])
+
+        if not isinstance(productos_data, list) or len(productos_data) == 0:
             return Response(
-                {"detail": "El campo 'productos' debe ser una lista no vacía."},
+                {"detail": "Sin datos: envía un archivo Excel (.xlsx) "
+                           "o el campo 'productos' como lista no vacía."},
                 status=status.HTTP_400_BAD_REQUEST)
 
         creados    = 0
@@ -559,13 +651,16 @@ class ImportarProductosView(APIView):
                     )
 
                     if tienda:
+                        inv_defaults = {
+                            "stock_actual": d.get("stock_actual", 0),
+                            "stock_minimo": d.get("stock_minimo", 0),
+                        }
+                        if d.get("stock_maximo") is not None:
+                            inv_defaults["stock_maximo"] = d["stock_maximo"]
                         Inventario.objects.update_or_create(
                             producto = producto,
                             tienda   = tienda,
-                            defaults = {
-                                "stock_actual": d.get("stock_actual", 0),
-                                "stock_minimo": d.get("stock_minimo", 0),
-                            },
+                            defaults = inv_defaults,
                         )
 
                 creados += 1
@@ -594,3 +689,398 @@ class ImportarProductosView(APIView):
             "total":      len(productos_data),
             "resultados": resultados,
         }, status=status.HTTP_207_MULTI_STATUS)
+
+
+# ── Dashboard KPIs de inventario ──────────────────────────
+class DashboardInventarioView(APIView):
+    """
+    GET /productos/dashboard/
+    Retorna KPIs de inventario para el panel de administración.
+    Parámetros opcionales: tienda_id, empresa (solo superadmin)
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from django.utils import timezone
+        from datetime import timedelta
+
+        inicio_mes = timezone.now().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0)
+
+        # ── Filtro base de inventario ──────────────────────
+        inv_qs = Inventario.objects.select_related(
+            "producto", "tienda")
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                inv_qs = inv_qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            inv_qs = inv_qs.filter(
+                tienda__empresa=get_empresa(request))
+
+        tienda_id = request.query_params.get("tienda_id")
+        if tienda_id:
+            inv_qs = inv_qs.filter(tienda_id=tienda_id)
+
+        inv_qs = inv_qs.filter(producto__activo=True)
+
+        # ── KPI 1: Valor total del inventario ─────────────
+        total_valor = inv_qs.aggregate(
+            valor=Sum(F("stock_actual") * F("producto__precio_venta"))
+        )["valor"] or 0
+
+        # ── KPI 2 y 3: Alertas de stock ───────────────────
+        alertas_bajo = inv_qs.filter(
+            stock_actual__lte=F("stock_minimo"),
+            stock_actual__gt=0,
+        ).count()
+
+        alertas_criticas = inv_qs.filter(stock_actual__lte=0).count()
+
+        # ── Filtro base de movimientos ─────────────────────
+        mov_qs = MovimientoInventario.objects.all()
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                mov_qs = mov_qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            mov_qs = mov_qs.filter(
+                tienda__empresa=get_empresa(request))
+
+        if tienda_id:
+            mov_qs = mov_qs.filter(tienda_id=tienda_id)
+
+        mov_mes = mov_qs.filter(created_at__gte=inicio_mes)
+
+        # ── KPI 4: Ingresos del mes (entradas de stock) ───
+        ingresos_mes = mov_mes.filter(
+            tipo="entrada"
+        ).aggregate(total=Sum("cantidad"))["total"] or 0
+
+        # ── KPI 5: Pérdidas/daños del mes ─────────────────
+        perdidas_valor = mov_mes.filter(
+            tipo="dano"
+        ).select_related("producto").aggregate(
+            valor=Sum(F("cantidad") * F("producto__precio_compra"))
+        )["valor"] or 0
+
+        # ── Productos nuevos registrados este mes ──────────
+        filtro_prod = {}
+        if not es_superadmin(request):
+            filtro_prod["empresa"] = get_empresa(request)
+        elif request.query_params.get("empresa"):
+            filtro_prod["empresa_id"] = request.query_params.get("empresa")
+
+        productos_mes = Producto.objects.filter(
+            created_at__gte=inicio_mes,
+            activo=True,
+            **filtro_prod,
+        ).count()
+
+        return Response({
+            "total_valor_inventario":  float(total_valor),
+            "alertas_stock_bajo":      alertas_bajo,
+            "alertas_criticas":        alertas_criticas,
+            "ingresos_mes_unidades":   float(ingresos_mes),
+            "productos_registrados_mes": productos_mes,
+            "perdidas_mes_valor":      float(perdidas_valor),
+        })
+
+
+# ── Feed global de movimientos recientes ─────────────────
+class MovimientosRecientesView(generics.ListAPIView):
+    """
+    GET /productos/movimientos/recientes/
+    Devuelve los últimos movimientos de inventario de todos los
+    productos/tiendas. Soporta filtro por tienda_id y tipo.
+    """
+    serializer_class   = MovimientoInventarioSerializer
+    permission_classes = [EsAdminOSupervisor]
+
+    def get_queryset(self):
+        qs = MovimientoInventario.objects.select_related(
+            "producto", "tienda", "empleado"
+        )
+
+        if es_superadmin(self.request):
+            empresa_id = self.request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+
+        tienda_id = self.request.query_params.get("tienda_id")
+        tipo      = self.request.query_params.get("tipo")
+        limite    = int(self.request.query_params.get("limite", 20))
+
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+        if tipo:
+            qs = qs.filter(tipo=tipo)
+
+        return qs.order_by("-created_at")[:limite]
+
+
+# ── Exportar inventario a Excel ───────────────────────────
+class ExportarInventarioView(APIView):
+    """
+    GET /productos/inventario/exportar/
+    Descarga el inventario filtrado como un archivo .xlsx con formato
+    de tabla profesional (colores, alertas, totales).
+    Parámetros opcionales: tienda_id, alerta, activo, empresa (superadmin)
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from django.http import HttpResponse
+        from django.utils import timezone
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+
+        # ── Mismo filtrado que InventarioListView ──────────
+        qs = Inventario.objects.select_related(
+            "producto", "producto__categoria", "tienda", "tienda__empresa"
+        )
+
+        if es_superadmin(request):
+            empresa_id = request.query_params.get("empresa")
+            if empresa_id:
+                qs = qs.filter(tienda__empresa_id=empresa_id)
+        else:
+            qs = qs.filter(tienda__empresa=get_empresa(request))
+
+        tienda_id = request.query_params.get("tienda_id")
+        alerta    = request.query_params.get("alerta")
+        activo    = request.query_params.get("activo", "true")
+
+        if activo == "true":
+            qs = qs.filter(producto__activo=True)
+        elif activo == "false":
+            qs = qs.filter(producto__activo=False)
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+        if alerta == "bajo":
+            qs = qs.filter(
+                stock_actual__lte=F("stock_minimo"), stock_actual__gt=0)
+        elif alerta == "agotado":
+            qs = qs.filter(stock_actual__lte=0)
+
+        inventarios = list(qs.order_by("tienda__nombre", "producto__nombre"))
+
+        # ── Nombre de empresa/tienda para el encabezado ───
+        if not es_superadmin(request):
+            empresa_nombre = get_empresa(request).nombre
+        elif inventarios:
+            empresa_nombre = inventarios[0].tienda.empresa.nombre \
+                if inventarios[0].tienda.empresa else "Todas las empresas"
+        else:
+            empresa_nombre = "Todas las empresas"
+
+        if tienda_id and inventarios:
+            tienda_label = inventarios[0].tienda.nombre
+        elif tienda_id:
+            tienda_label = f"Tienda #{tienda_id}"
+        else:
+            tienda_label = "Todas las tiendas"
+
+        # ── Workbook ───────────────────────────────────────
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Inventario"
+
+        # Estilos
+        C_AZUL_OSCURO = "1E3A5F"
+        C_AZUL_MEDIO  = "2E86AB"
+        C_FILA_PAR    = "EBF5FB"
+        C_AGOTADO     = "FADBD8"
+        C_BAJO        = "FEF9E7"
+        C_TOTAL       = "D5D8DC"
+        C_OK          = "D5F5E3"
+
+        def fill(color):
+            return PatternFill("solid", fgColor=color)
+
+        def border():
+            thin = Side(style="thin", color="BFBFBF")
+            return Border(left=thin, right=thin, top=thin, bottom=thin)
+
+        f_titulo   = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
+        f_sub      = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+        f_header   = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+        f_normal   = Font(name="Calibri", size=10)
+        f_bold     = Font(name="Calibri", bold=True, size=10)
+        f_rojo     = Font(name="Calibri", bold=True, size=10, color="C0392B")
+        f_amarillo = Font(name="Calibri", bold=True, size=10, color="9A7D0A")
+        f_verde    = Font(name="Calibri", bold=True, size=10, color="1E8449")
+
+        ac = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        al = Alignment(horizontal="left",   vertical="center")
+        ar = Alignment(horizontal="right",  vertical="center")
+
+        COLUMNAS = [
+            ("#",                     5,  "center"),
+            ("Código de Barras",     18,  "left"),
+            ("Nombre del Producto",  35,  "left"),
+            ("Categoría",            20,  "left"),
+            ("Precio Compra",        15,  "right"),
+            ("Precio Venta",         14,  "right"),
+            ("Precio Mayoreo",       14,  "right"),
+            ("Stock Actual",         13,  "right"),
+            ("Stock Mínimo",         13,  "right"),
+            ("Stock Máximo",         13,  "right"),
+            ("Valor Inventario",     18,  "right"),
+            ("Estado",               12,  "center"),
+            ("Tienda",               20,  "left"),
+            ("Última Actualización", 20,  "center"),
+        ]
+        N = len(COLUMNAS)
+        ultima_col = get_column_letter(N)
+        now = timezone.now()
+
+        # ── Fila 1: Título ─────────────────────────────────
+        ws.row_dimensions[1].height = 32
+        ws.merge_cells(f"A1:{ultima_col}1")
+        c = ws["A1"]
+        c.value     = f"REPORTE DE INVENTARIO  —  {empresa_nombre.upper()}"
+        c.font      = f_titulo
+        c.fill      = fill(C_AZUL_OSCURO)
+        c.alignment = ac
+
+        # ── Fila 2: Subtítulo ──────────────────────────────
+        ws.row_dimensions[2].height = 20
+        ws.merge_cells(f"A2:{ultima_col}2")
+        c = ws["A2"]
+        c.value     = (
+            f"Generado: {now.strftime('%d/%m/%Y %H:%M')}  |  "
+            f"{tienda_label}  |  "
+            f"Registros: {len(inventarios)}"
+        )
+        c.font      = f_sub
+        c.fill      = fill(C_AZUL_MEDIO)
+        c.alignment = ac
+
+        # ── Fila 3: Headers de columnas ────────────────────
+        ws.row_dimensions[3].height = 22
+        for i, (nombre, ancho, _) in enumerate(COLUMNAS, start=1):
+            col_letra = get_column_letter(i)
+            ws.column_dimensions[col_letra].width = ancho
+            c = ws.cell(row=3, column=i, value=nombre)
+            c.font      = f_header
+            c.fill      = fill(C_AZUL_OSCURO)
+            c.alignment = ac
+            c.border    = border()
+
+        # ── Filas de datos ─────────────────────────────────
+        total_valor = 0.0
+
+        for num, inv in enumerate(inventarios, start=1):
+            fila = num + 3
+            ws.row_dimensions[fila].height = 16
+
+            stock      = float(inv.stock_actual)
+            stock_min  = float(inv.stock_minimo)
+            stock_max  = float(inv.stock_maximo)
+            p_compra   = float(inv.producto.precio_compra)
+            p_venta    = float(inv.producto.precio_venta)
+            p_mayoreo  = float(inv.producto.precio_mayoreo) \
+                         if inv.producto.precio_mayoreo else None
+            valor      = stock * p_venta
+            total_valor += valor
+
+            if stock <= 0:
+                estado       = "Agotado"
+                fill_fila    = fill(C_AGOTADO)
+                font_estado  = f_rojo
+            elif stock <= stock_min:
+                estado       = "Stock Bajo"
+                fill_fila    = fill(C_BAJO)
+                font_estado  = f_amarillo
+            else:
+                estado       = "OK"
+                fill_fila    = fill(C_FILA_PAR) if num % 2 == 0 else None
+                font_estado  = f_verde
+
+            categoria = inv.producto.categoria.nombre \
+                        if inv.producto.categoria else "Sin categoría"
+            actualizado = inv.updated_at.strftime("%d/%m/%Y %H:%M") \
+                          if inv.updated_at else ""
+
+            celdas = [
+                (num,                              "center", f_normal,   None),
+                (inv.producto.codigo_barras or "", "left",   f_normal,   None),
+                (inv.producto.nombre,              "left",   f_bold,     None),
+                (categoria,                        "left",   f_normal,   None),
+                (p_compra,                         "right",  f_normal,   "#,##0.00"),
+                (p_venta,                          "right",  f_normal,   "#,##0.00"),
+                (p_mayoreo if p_mayoreo else "",   "right",  f_normal,   "#,##0.00" if p_mayoreo else None),
+                (stock,                            "right",  f_normal,   "#,##0.00"),
+                (stock_min,                        "right",  f_normal,   "#,##0.00"),
+                (stock_max,                        "right",  f_normal,   "#,##0.00"),
+                (valor,                            "right",  f_bold,     "#,##0.00"),
+                (estado,                           "center", font_estado, None),
+                (inv.tienda.nombre,                "left",   f_normal,   None),
+                (actualizado,                      "center", f_normal,   None),
+            ]
+
+            for col_idx, (valor_celda, alin, fuente, fmt) in enumerate(celdas, start=1):
+                c = ws.cell(row=fila, column=col_idx, value=valor_celda)
+                c.font   = fuente
+                c.border = border()
+                c.alignment = (
+                    ac if alin == "center" else
+                    ar if alin == "right"  else al
+                )
+                if fill_fila and col_idx != 12:
+                    c.fill = fill_fila
+                elif col_idx == 12:
+                    if estado == "Agotado":
+                        c.fill = fill(C_AGOTADO)
+                    elif estado == "Stock Bajo":
+                        c.fill = fill(C_BAJO)
+                    elif fill_fila:
+                        c.fill = fill_fila
+                if fmt:
+                    c.number_format = fmt
+
+        # ── Fila de totales ────────────────────────────────
+        fila_total = len(inventarios) + 4
+        ws.row_dimensions[fila_total].height = 20
+        ws.merge_cells(f"A{fila_total}:J{fila_total}")
+        c = ws.cell(row=fila_total, column=1,
+                    value="VALOR TOTAL DEL INVENTARIO")
+        c.font      = f_bold
+        c.fill      = fill(C_TOTAL)
+        c.alignment = ar
+        c.border    = border()
+
+        c = ws.cell(row=fila_total, column=11, value=total_valor)
+        c.font          = f_bold
+        c.fill          = fill(C_TOTAL)
+        c.alignment     = ar
+        c.number_format = "#,##0.00"
+        c.border        = border()
+
+        for col_idx in range(12, N + 1):
+            c = ws.cell(row=fila_total, column=col_idx, value="")
+            c.fill   = fill(C_TOTAL)
+            c.border = border()
+
+        # ── Congelar encabezados ───────────────────────────
+        ws.freeze_panes = "A4"
+
+        # ── Respuesta HTTP ─────────────────────────────────
+        fecha_str = now.strftime("%Y%m%d_%H%M")
+        response  = HttpResponse(
+            content_type=(
+                "application/vnd.openxmlformats-officedocument"
+                ".spreadsheetml.sheet"
+            )
+        )
+        response["Content-Disposition"] = (
+            f'attachment; filename="inventario_{fecha_str}.xlsx"'
+        )
+        wb.save(response)
+        return response

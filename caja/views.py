@@ -228,12 +228,14 @@ class SesionCajaListView(generics.ListAPIView):
         else:
             qs = qs.filter(tienda__empresa=get_empresa(self.request))
 
-        tienda_id = self.request.query_params.get("tienda_id")
-        fecha     = self.request.query_params.get("fecha")
-        estado    = self.request.query_params.get("estado", "cerrada")
+        tienda_id    = self.request.query_params.get("tienda_id")
+        fecha        = self.request.query_params.get("fecha")
+        estado       = self.request.query_params.get("estado", "cerrada")
+        mis_sesiones = self.request.query_params.get("mis_sesiones")
 
-        if tienda_id: qs = qs.filter(tienda_id=tienda_id)
-        if fecha:     qs = qs.filter(fecha_apertura__date=fecha)
+        if tienda_id:    qs = qs.filter(tienda_id=tienda_id)
+        if fecha:        qs = qs.filter(fecha_apertura__date=fecha)
+        if mis_sesiones: qs = qs.filter(empleado=self.request.user)
         qs = qs.filter(estado=estado)
         return qs
 
@@ -373,4 +375,206 @@ class ResumenCierreView(APIView):
                 ).count(),
             },
             "monto_esperado_caja": float(monto_esperado),
+        })
+
+
+# ── Dashboard de Caja (Admin / Superadmin) ────────────────────
+class DashboardCajaView(APIView):
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.db.models import F
+        from ventas.models import Venta
+        from contabilidad.models import Gasto
+        from tiendas.models import Tienda
+
+        hoy          = timezone.now().date()
+        inicio_mes   = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        dia_semana   = timezone.now().weekday()
+        inicio_semana = (timezone.now() - timedelta(days=dia_semana)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+
+        periodo       = request.query_params.get("periodo", "mensual")
+        inicio_actual = inicio_semana if periodo == "semanal" else inicio_mes
+        inicio_ant    = (inicio_actual - timedelta(days=7)) if periodo == "semanal" \
+                        else (inicio_actual.replace(month=inicio_actual.month - 1)
+                              if inicio_actual.month > 1
+                              else inicio_actual.replace(year=inicio_actual.year - 1, month=12))
+
+        tienda_id  = request.query_params.get("tienda_id")
+        superadmin = es_superadmin(request)
+        empresa    = None if superadmin else get_empresa(request)
+        emp_param  = request.query_params.get("empresa") if superadmin else None
+
+        def por_empresa_sesion(qs):
+            if not superadmin:
+                return qs.filter(tienda__empresa=empresa)
+            if emp_param:
+                return qs.filter(tienda__empresa_id=emp_param)
+            return qs
+
+        def por_empresa_venta(qs):
+            if not superadmin:
+                return qs.filter(empresa=empresa)
+            if emp_param:
+                return qs.filter(empresa_id=emp_param)
+            return qs
+
+        def por_empresa_tienda(qs):
+            if not superadmin:
+                return qs.filter(tienda__empresa=empresa)
+            if emp_param:
+                return qs.filter(tienda__empresa_id=emp_param)
+            return qs
+
+        # ── KPIs ──────────────────────────────────────────────
+        venta_qs = por_empresa_venta(
+            Venta.objects.filter(estado="completada", created_at__gte=inicio_actual)
+        )
+        if tienda_id:
+            venta_qs = venta_qs.filter(tienda_id=tienda_id)
+
+        total_cash_flow = venta_qs.aggregate(t=Sum("total"))["t"] or 0
+
+        # Top performing store (ventas de hoy)
+        top_qs = por_empresa_venta(
+            Venta.objects.filter(estado="completada", created_at__date=hoy)
+        )
+        if tienda_id:
+            top_qs = top_qs.filter(tienda_id=tienda_id)
+
+        top_store_raw = (
+            top_qs.values("tienda_id", "tienda__nombre")
+            .annotate(total=Sum("total"))
+            .order_by("-total")
+            .first()
+        )
+        top_store = {
+            "nombre": top_store_raw["tienda__nombre"] if top_store_raw else "—",
+            "total_hoy": float(top_store_raw["total"]) if top_store_raw else 0.0,
+        }
+
+        # Total discrepancias (faltantes) del período
+        sesion_qs = por_empresa_sesion(
+            SesionCaja.objects.filter(
+                estado="cerrada",
+                fecha_cierre__gte=inicio_actual,
+                diferencia__lt=0,
+            )
+        )
+        if tienda_id:
+            sesion_qs = sesion_qs.filter(tienda_id=tienda_id)
+
+        total_discrepancias = sesion_qs.aggregate(
+            t=Sum("diferencia")
+        )["t"] or 0
+        num_tiendas_con_diff = sesion_qs.values("tienda_id").distinct().count()
+
+        # Net profit (ventas - gastos del mes)
+        ventas_mes = por_empresa_venta(
+            Venta.objects.filter(estado="completada", created_at__gte=inicio_mes)
+        )
+        if tienda_id:
+            ventas_mes = ventas_mes.filter(tienda_id=tienda_id)
+        total_ventas_mes = ventas_mes.aggregate(t=Sum("total"))["t"] or 0
+
+        gasto_qs = por_empresa_tienda(
+            Gasto.objects.filter(created_at__gte=inicio_mes)
+        )
+        if tienda_id:
+            gasto_qs = gasto_qs.filter(tienda_id=tienda_id)
+        total_gastos_mes = gasto_qs.aggregate(t=Sum("monto"))["t"] or 0
+        net_profit = float(total_ventas_mes) - float(total_gastos_mes)
+
+        # ── Sales trends by store ─────────────────────────────
+        trends_qs = por_empresa_venta(
+            Venta.objects.filter(estado="completada", created_at__gte=inicio_actual)
+        )
+        if tienda_id:
+            trends_qs = trends_qs.filter(tienda_id=tienda_id)
+
+        ventas_por_tienda = [
+            {"tienda_id": r["tienda_id"], "nombre": r["tienda__nombre"], "total": float(r["total"] or 0)}
+            for r in trends_qs.values("tienda_id", "tienda__nombre")
+            .annotate(total=Sum("total"))
+            .order_by("-total")[:10]
+        ]
+
+        # ── Alertas de faltantes ──────────────────────────────
+        faltantes_qs = por_empresa_sesion(
+            SesionCaja.objects.filter(
+                estado="cerrada",
+                diferencia__lt=0,
+            ).select_related("tienda", "empleado")
+        )
+        if tienda_id:
+            faltantes_qs = faltantes_qs.filter(tienda_id=tienda_id)
+        faltantes_qs = faltantes_qs.order_by("diferencia")[:20]
+
+        alertas_faltantes = [
+            {
+                "sesion_id":      s.id,
+                "tienda":         s.tienda.nombre,
+                "empleado":       f"{s.empleado.nombre} {s.empleado.apellido}" if s.empleado else "—",
+                "diferencia":     float(s.diferencia),
+                "fecha":          s.fecha_apertura.date().isoformat(),
+                "fecha_cierre":   s.fecha_cierre.isoformat() if s.fecha_cierre else None,
+            }
+            for s in faltantes_qs
+        ]
+
+        # ── Top stores by growth ──────────────────────────────
+        def ventas_por_tienda_en(inicio, fin=None):
+            qs = por_empresa_venta(Venta.objects.filter(
+                estado="completada", created_at__gte=inicio,
+            ))
+            if fin:
+                qs = qs.filter(created_at__lt=fin)
+            if tienda_id:
+                qs = qs.filter(tienda_id=tienda_id)
+            return {
+                r["tienda_id"]: float(r["total"] or 0)
+                for r in qs.values("tienda_id", "tienda__nombre")
+                .annotate(total=Sum("total"))
+            }
+
+        actuales   = {
+            r["tienda_id"]: {"nombre": r["tienda__nombre"], "total": float(r["total"] or 0)}
+            for r in trends_qs.values("tienda_id", "tienda__nombre").annotate(total=Sum("total"))
+        }
+        anteriores = ventas_por_tienda_en(inicio_ant, inicio_actual)
+
+        top_crecimiento = []
+        for tid, datos in actuales.items():
+            ant = anteriores.get(tid, 0)
+            if ant > 0:
+                pct = round(((datos["total"] - ant) / ant) * 100, 1)
+            elif datos["total"] > 0:
+                pct = 100.0
+            else:
+                pct = 0.0
+            top_crecimiento.append({
+                "tienda_id": tid,
+                "nombre":    datos["nombre"],
+                "total_actual": datos["total"],
+                "total_anterior": ant,
+                "crecimiento_pct": pct,
+            })
+        top_crecimiento.sort(key=lambda x: x["crecimiento_pct"], reverse=True)
+        top_crecimiento = top_crecimiento[:5]
+
+        return Response({
+            "periodo": periodo,
+            "kpis": {
+                "total_cash_flow":          float(total_cash_flow),
+                "top_store":                top_store,
+                "total_discrepancias":      float(total_discrepancias),
+                "num_tiendas_con_faltante": num_tiendas_con_diff,
+                "net_profit":               round(net_profit, 2),
+            },
+            "ventas_por_tienda":   ventas_por_tienda,
+            "alertas_faltantes":   alertas_faltantes,
+            "top_crecimiento":     top_crecimiento,
         })

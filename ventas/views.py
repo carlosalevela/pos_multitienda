@@ -283,3 +283,216 @@ class CambioPOSView(APIView):
             VentaSerializer(venta, context={"request": request}).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+# ── Dashboard general Admin ───────────────────────────────
+class DashboardAdminView(APIView):
+    """
+    GET /api/ventas/dashboard/
+    Retorna en una sola llamada todos los datos del panel admin:
+      - kpis: ventas hoy, variación %, inventario bajo, balance mensual, compras pendientes
+      - ventas_por_tienda: para el gráfico de barras (?periodo=semanal|mensual)
+      - transacciones_recientes: ventas + devoluciones mezcladas
+      - desempeno_tiendas: tabla de rendimiento por tienda
+    Params opcionales: tienda_id, periodo, empresa (solo superadmin)
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.db.models import F
+        from devoluciones.models import Devolucion
+        from productos.models import Inventario
+        from contabilidad.models import Gasto
+        from proveedores.models import Compra
+        from tiendas.models import Tienda
+        from caja.models import SesionCaja
+        from usuarios.models import Empleado
+
+        hoy          = timezone.now().date()
+        ayer         = hoy - timedelta(days=1)
+        inicio_mes   = timezone.now().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0)
+        dia_semana   = timezone.now().weekday()
+        inicio_semana = (timezone.now() - timedelta(days=dia_semana)).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+
+        periodo        = request.query_params.get("periodo", "mensual")
+        inicio_periodo = inicio_semana if periodo == "semanal" else inicio_mes
+        tienda_id      = request.query_params.get("tienda_id")
+
+        # ── Helpers de filtro por empresa ──────────────────
+        superadmin = es_superadmin(request)
+        empresa    = None if superadmin else get_empresa(request)
+        emp_param  = request.query_params.get("empresa") if superadmin else None
+
+        def por_empresa(qs, campo="empresa"):
+            if not superadmin:
+                return qs.filter(**{campo: empresa})
+            if emp_param:
+                return qs.filter(**{f"{campo}_id": emp_param})
+            return qs
+
+        def por_empresa_tienda(qs):
+            if not superadmin:
+                return qs.filter(tienda__empresa=empresa)
+            if emp_param:
+                return qs.filter(tienda__empresa_id=emp_param)
+            return qs
+
+        # ── QuerySets base ─────────────────────────────────
+        venta_qs = por_empresa(
+            Venta.objects.filter(estado="completada"))
+        if tienda_id:
+            venta_qs = venta_qs.filter(tienda_id=tienda_id)
+
+        # ── KPI 1: Ventas hoy + variación vs ayer ─────────
+        ventas_hoy  = venta_qs.filter(
+            created_at__date=hoy).aggregate(t=Sum("total"))["t"] or 0
+        ventas_ayer = venta_qs.filter(
+            created_at__date=ayer).aggregate(t=Sum("total"))["t"] or 0
+        variacion = 0.0
+        if ventas_ayer:
+            variacion = round(
+                ((float(ventas_hoy) - float(ventas_ayer)) / float(ventas_ayer)) * 100, 1)
+
+        # ── KPI 2: Alertas de inventario ──────────────────
+        inv_qs = por_empresa_tienda(
+            Inventario.objects.filter(producto__activo=True))
+        if tienda_id:
+            inv_qs = inv_qs.filter(tienda_id=tienda_id)
+        stock_bajo    = inv_qs.filter(
+            stock_actual__lte=F("stock_minimo"), stock_actual__gt=0).count()
+        stock_critico = inv_qs.filter(stock_actual__lte=0).count()
+
+        # ── KPI 3: Balance mensual (ventas − gastos) ───────
+        ventas_mes = venta_qs.filter(
+            created_at__gte=inicio_mes).aggregate(t=Sum("total"))["t"] or 0
+        gasto_qs = por_empresa_tienda(
+            Gasto.objects.filter(created_at__gte=inicio_mes))
+        if tienda_id:
+            gasto_qs = gasto_qs.filter(tienda_id=tienda_id)
+        gastos_mes      = gasto_qs.aggregate(t=Sum("monto"))["t"] or 0
+        balance_mensual = round(float(ventas_mes) - float(gastos_mes), 2)
+
+        # ── KPI 4: Compras pendientes ──────────────────────
+        compra_qs = por_empresa_tienda(
+            Compra.objects.filter(estado="pendiente"))
+        if tienda_id:
+            compra_qs = compra_qs.filter(tienda_id=tienda_id)
+        compras_pendientes = compra_qs.count()
+
+        # ── Gráfico: ventas por tienda ─────────────────────
+        ventas_tienda = (
+            venta_qs.filter(created_at__gte=inicio_periodo)
+            .values("tienda_id", "tienda__nombre")
+            .annotate(total=Sum("total"))
+            .order_by("-total")[:10]
+        )
+        ventas_por_tienda = [
+            {
+                "tienda_id": r["tienda_id"],
+                "nombre":    r["tienda__nombre"],
+                "total":     float(r["total"] or 0),
+            }
+            for r in ventas_tienda
+        ]
+
+        # ── Transacciones recientes (ventas + devoluciones) ─
+        v_raw = list(
+            venta_qs.order_by("-created_at")[:10]
+            .values("numero_factura", "tienda__nombre", "total", "created_at")
+        )
+        dev_qs = por_empresa_tienda(
+            Devolucion.objects.filter(estado="procesada"))
+        if tienda_id:
+            dev_qs = dev_qs.filter(tienda_id=tienda_id)
+        d_raw = list(
+            dev_qs.order_by("-created_at")[:10]
+            .values("id", "tienda__nombre", "total_devuelto", "created_at", "tipo")
+        )
+
+        transacciones = [
+            {
+                "tipo":       "venta",
+                "numero":     r["numero_factura"],
+                "tienda":     r["tienda__nombre"],
+                "monto":      float(r["total"]),
+                "created_at": r["created_at"].isoformat(),
+            }
+            for r in v_raw
+        ] + [
+            {
+                "tipo":       r["tipo"],
+                "numero":     f"DEV-{r['id']}",
+                "tienda":     r["tienda__nombre"],
+                "monto":      -float(r["total_devuelto"]),
+                "created_at": r["created_at"].isoformat(),
+            }
+            for r in d_raw
+        ]
+        transacciones.sort(key=lambda x: x["created_at"], reverse=True)
+        transacciones = transacciones[:15]
+
+        # ── Desempeño por tienda ───────────────────────────
+        tienda_qs = por_empresa(Tienda.objects.filter(activo=True))
+        if tienda_id:
+            tienda_qs = tienda_qs.filter(id=tienda_id)
+
+        desempeno = []
+        for t in tienda_qs:
+            v_hoy = Venta.objects.filter(
+                tienda=t, estado="completada",
+                created_at__date=hoy,
+            ).aggregate(total=Sum("total"))["total"] or 0
+
+            cajas_abiertas = SesionCaja.objects.filter(
+                tienda=t, estado="abierta").count()
+            cajas_hoy = SesionCaja.objects.filter(
+                tienda=t, fecha_apertura__date=hoy).count()
+            cajas_total = max(cajas_hoy, cajas_abiertas, 1)
+            eficiencia  = round((cajas_abiertas / cajas_total) * 100)
+
+            encargado = Empleado.objects.filter(
+                tienda=t, rol__in=["admin", "supervisor"], activo=True,
+            ).first()
+            nombre_enc = (
+                f"{encargado.nombre} {encargado.apellido}"
+                if encargado else "—"
+            )
+
+            if eficiencia >= 90:
+                estado = "optimo"
+            elif eficiencia >= 60:
+                estado = "estable"
+            else:
+                estado = "moderado"
+
+            desempeno.append({
+                "tienda_id":      t.id,
+                "nombre":         t.nombre,
+                "encargado":      nombre_enc,
+                "ventas_hoy":     float(v_hoy),
+                "cajas_activas":  cajas_abiertas,
+                "cajas_total":    cajas_total,
+                "eficiencia_pct": eficiencia,
+                "estado":         estado,
+            })
+
+        desempeno.sort(key=lambda x: x["ventas_hoy"], reverse=True)
+
+        return Response({
+            "kpis": {
+                "ventas_hoy":              float(ventas_hoy),
+                "ventas_hoy_variacion_pct": variacion,
+                "inventario_bajo_sku":     stock_bajo,
+                "alertas_criticas":        stock_critico,
+                "balance_mensual":         balance_mensual,
+                "compras_pendientes":      compras_pendientes,
+            },
+            "periodo":                periodo,
+            "ventas_por_tienda":       ventas_por_tienda,
+            "transacciones_recientes": transacciones,
+            "desempeno_tiendas":       desempeno,
+        })

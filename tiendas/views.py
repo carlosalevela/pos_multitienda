@@ -1,11 +1,11 @@
-# tiendas/views.py
-
 from rest_framework import generics
-from rest_framework.views import APIView
-from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
+from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
+from empresas.models import Empresa
 from .models import Tienda
 from .serializers import TiendaSerializer, TiendaSimpleSerializer
 from usuarios.models import Empleado
@@ -16,25 +16,17 @@ class TiendaListCreateView(generics.ListCreateAPIView):
     permission_classes = [EsAdmin]
 
     def get_queryset(self):
-        qs = Tienda.objects.prefetch_related("empleados")
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-        else:
-            qs = qs.filter(empresa=get_empresa(self.request))
-
+        qs = scope_qs(
+            self.request,
+            Tienda.objects.prefetch_related("empleados"),
+            campo_empresa="empresa",
+        )
         solo_activas = self.request.query_params.get("activo")
         if solo_activas is not None:
             qs = qs.filter(activo=solo_activas.lower() == "true")
-
         return qs.order_by("nombre")
 
     def perform_create(self, serializer):
-        from rest_framework.exceptions import ValidationError
-        from empresas.models import Empresa
-
         if es_superadmin(self.request):
             empresa_id = (
                 self.request.data.get("empresa")
@@ -57,6 +49,7 @@ class TiendaListCreateView(generics.ListCreateAPIView):
             serializer.save(empresa=empresa)
         else:
             serializer.save(empresa=get_empresa(self.request))
+
 
 class TiendaDetailView(generics.RetrieveUpdateDestroyAPIView):
     serializer_class = TiendaSerializer
@@ -82,15 +75,10 @@ class TiendaSimpleListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            qs = Tienda.objects.filter(activo=True)
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-            return qs.order_by("nombre")
-        return Tienda.objects.filter(
-            activo=True,
-            empresa=get_empresa(self.request),
+        return scope_qs(
+            self.request,
+            Tienda.objects.filter(activo=True),
+            campo_empresa="empresa",
         ).order_by("nombre")
 
 

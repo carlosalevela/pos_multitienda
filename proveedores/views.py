@@ -1,13 +1,12 @@
-# compras/views.py
-
-from rest_framework import generics
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.utils import timezone
+from rest_framework import generics
+from rest_framework.exceptions import PermissionDenied
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
+from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
 from .models import Proveedor, Compra
 from .serializers import ProveedorSerializer, ProveedorSimpleSerializer, CompraSerializer
 from productos.models import Inventario, MovimientoInventario, Producto, generar_codigo_barras_interno
@@ -21,15 +20,11 @@ class ProveedorListCreateView(generics.ListCreateAPIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
-        qs = Proveedor.objects.filter(activo=True)
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-        else:
-            qs = qs.filter(empresa=get_empresa(self.request))
-
+        qs = scope_qs(
+            self.request,
+            Proveedor.objects.filter(activo=True),
+            campo_empresa="empresa",
+        )
         q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(nombre__icontains=q)
@@ -39,7 +34,6 @@ class ProveedorListCreateView(generics.ListCreateAPIView):
         if es_superadmin(self.request):
             empresa_id = self.request.data.get("empresa_id")
             if not empresa_id:
-                from rest_framework.exceptions import PermissionDenied
                 raise PermissionDenied(
                     "El superadmin debe especificar una empresa.")
             serializer.save(empresa_id=empresa_id)
@@ -102,16 +96,12 @@ class CompraListCreateView(generics.ListCreateAPIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
-        qs = Compra.objects.select_related(
-            "proveedor", "tienda", "empleado"
-        ).prefetch_related("detalles")
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+        qs = scope_qs(
+            self.request,
+            Compra.objects.select_related(
+                "proveedor", "tienda", "empleado"
+            ).prefetch_related("detalles"),
+        )
 
         tienda_id = self.request.query_params.get("tienda_id")
         estado    = self.request.query_params.get("estado")
@@ -169,7 +159,6 @@ class RecibirCompraView(APIView):
                 {"error": "No se puede recibir una compra cancelada."},
                 status=400)
 
-        # ✅ Leer precios enviados desde el modal de Flutter
         # precios:        {str(detalleId): precioVenta}
         # precios_mayoreo:{str(detalleId): precioMayoreo}
         precios_venta   = request.data.get('precios', {})
@@ -193,7 +182,6 @@ class RecibirCompraView(APIView):
                 detalle.producto = nuevo_producto
                 detalle.save()
 
-            # ✅ Actualizar precio_venta y precio_mayoreo del producto
             producto        = detalle.producto
             detalle_id_str  = str(detalle.id)
             precio_venta_nuevo  = precios_venta.get(detalle_id_str)
@@ -251,8 +239,8 @@ class RecibirCompraView(APIView):
                                      if detalle.categoria else None,
                 "cantidad_recibida": float(detalle.cantidad),
                 "stock_actual":      float(inv.stock_actual),
-                "precio_venta":      float(producto.precio_venta),      # ✅ confirma el precio guardado
-                "precio_compra":     float(producto.precio_compra),     # ✅ confirma el costo
+                "precio_venta":  float(producto.precio_venta),
+                "precio_compra": float(producto.precio_compra),
             })
 
         compra.estado          = "recibida"

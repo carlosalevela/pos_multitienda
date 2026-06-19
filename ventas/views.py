@@ -1,19 +1,24 @@
-# ventas/views.py
-
+from datetime import timedelta
 from decimal import Decimal
-from rest_framework import generics, status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db import transaction
-from django.db.models import Sum
 
-from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
+from django.db import transaction
+from django.db.models import F, Sum
+from django.utils import timezone
+from rest_framework import generics, status
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from contabilidad.models import Gasto
+from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
+from caja.models import SesionCaja
+from devoluciones.models import Devolucion, DetalleDevolucion
+from productos.models import Inventario, MovimientoInventario
+from proveedores.models import Compra
+from tiendas.models import Tienda
+from usuarios.models import Empleado
 from .models import Venta
 from .serializers import VentaSerializer, CambioPOSSerializer
-from productos.models import Inventario, MovimientoInventario
-from caja.models import SesionCaja
-from devoluciones.models import DetalleDevolucion
 
 
 # ── Crear venta ───────────────────────────────────────────
@@ -81,7 +86,7 @@ class CrearVentaView(APIView):
             )
 
         return Response({
-            "detail":         "Venta registrada correctamente. ✅",
+            "detail":         "Venta registrada correctamente.",
             "numero_factura": venta.numero_factura,
             "total":          float(venta.total),
             "vuelto":         float(venta.vuelto),
@@ -112,15 +117,8 @@ class VentaListView(generics.ListAPIView):
             "cliente", "empleado", "tienda", "sesion_caja"
         ).prefetch_related("detalles")
 
-        # superadmin ve todo, filtra por empresa opcional
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+        qs = scope_qs(self.request, qs, campo_empresa="tienda__empresa")
 
-        # cajero solo ve su tienda y puede filtrar por fecha
         if user.rol == "cajero":
             qs    = qs.filter(tienda_id=user.tienda_id)
             fecha = self.request.query_params.get("fecha")
@@ -179,8 +177,7 @@ class AnularVentaView(APIView):
         for detalle in venta.detalles.all():
             inv, _ = Inventario.objects.get_or_create(
                 producto=detalle.producto, tienda=venta.tienda,
-                defaults={"stock_actual": 0,
-                          "stock_minimo": 0, "stock_maximo": 0}
+                defaults={"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0}
             )
             inv.stock_actual += detalle.cantidad
             inv.save()
@@ -287,34 +284,14 @@ class CambioPOSView(APIView):
 
 # ── Dashboard general Admin ───────────────────────────────
 class DashboardAdminView(APIView):
-    """
-    GET /api/ventas/dashboard/
-    Retorna en una sola llamada todos los datos del panel admin:
-      - kpis: ventas hoy, variación %, inventario bajo, balance mensual, compras pendientes
-      - ventas_por_tienda: para el gráfico de barras (?periodo=semanal|mensual)
-      - transacciones_recientes: ventas + devoluciones mezcladas
-      - desempeno_tiendas: tabla de rendimiento por tienda
-    Params opcionales: tienda_id, periodo, empresa (solo superadmin)
-    """
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        from datetime import timedelta
-        from django.utils import timezone
-        from django.db.models import F
-        from devoluciones.models import Devolucion
-        from productos.models import Inventario
-        from contabilidad.models import Gasto
-        from proveedores.models import Compra
-        from tiendas.models import Tienda
-        from caja.models import SesionCaja
-        from usuarios.models import Empleado
-
         hoy          = timezone.now().date()
         ayer         = hoy - timedelta(days=1)
         inicio_mes   = timezone.now().replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
-        dia_semana   = timezone.now().weekday()
+        dia_semana    = timezone.now().weekday()
         inicio_semana = (timezone.now() - timedelta(days=dia_semana)).replace(
             hour=0, minute=0, second=0, microsecond=0)
 
@@ -322,28 +299,12 @@ class DashboardAdminView(APIView):
         inicio_periodo = inicio_semana if periodo == "semanal" else inicio_mes
         tienda_id      = request.query_params.get("tienda_id")
 
-        # ── Helpers de filtro por empresa ──────────────────
-        superadmin = es_superadmin(request)
-        empresa    = None if superadmin else get_empresa(request)
-        emp_param  = request.query_params.get("empresa") if superadmin else None
-
-        def por_empresa(qs, campo="empresa"):
-            if not superadmin:
-                return qs.filter(**{campo: empresa})
-            if emp_param:
-                return qs.filter(**{f"{campo}_id": emp_param})
-            return qs
-
-        def por_empresa_tienda(qs):
-            if not superadmin:
-                return qs.filter(tienda__empresa=empresa)
-            if emp_param:
-                return qs.filter(tienda__empresa_id=emp_param)
-            return qs
-
         # ── QuerySets base ─────────────────────────────────
-        venta_qs = por_empresa(
-            Venta.objects.filter(estado="completada"))
+        venta_qs = scope_qs(
+            request,
+            Venta.objects.filter(estado="completada"),
+            campo_empresa="tienda__empresa",
+        )
         if tienda_id:
             venta_qs = venta_qs.filter(tienda_id=tienda_id)
 
@@ -358,8 +319,7 @@ class DashboardAdminView(APIView):
                 ((float(ventas_hoy) - float(ventas_ayer)) / float(ventas_ayer)) * 100, 1)
 
         # ── KPI 2: Alertas de inventario ──────────────────
-        inv_qs = por_empresa_tienda(
-            Inventario.objects.filter(producto__activo=True))
+        inv_qs = scope_qs(request, Inventario.objects.filter(producto__activo=True))
         if tienda_id:
             inv_qs = inv_qs.filter(tienda_id=tienda_id)
         stock_bajo    = inv_qs.filter(
@@ -369,34 +329,31 @@ class DashboardAdminView(APIView):
         # ── KPI 3: Balance mensual (ventas − gastos) ───────
         ventas_mes = venta_qs.filter(
             created_at__gte=inicio_mes).aggregate(t=Sum("total"))["t"] or 0
-        gasto_qs = por_empresa_tienda(
-            Gasto.objects.filter(created_at__gte=inicio_mes))
+        gasto_qs   = scope_qs(request, Gasto.objects.filter(created_at__gte=inicio_mes))
         if tienda_id:
             gasto_qs = gasto_qs.filter(tienda_id=tienda_id)
         gastos_mes      = gasto_qs.aggregate(t=Sum("monto"))["t"] or 0
         balance_mensual = round(float(ventas_mes) - float(gastos_mes), 2)
 
         # ── KPI 4: Compras pendientes ──────────────────────
-        compra_qs = por_empresa_tienda(
-            Compra.objects.filter(estado="pendiente"))
+        compra_qs = scope_qs(request, Compra.objects.filter(estado="pendiente"))
         if tienda_id:
             compra_qs = compra_qs.filter(tienda_id=tienda_id)
         compras_pendientes = compra_qs.count()
 
         # ── Gráfico: ventas por tienda ─────────────────────
-        ventas_tienda = (
-            venta_qs.filter(created_at__gte=inicio_periodo)
-            .values("tienda_id", "tienda__nombre")
-            .annotate(total=Sum("total"))
-            .order_by("-total")[:10]
-        )
         ventas_por_tienda = [
             {
                 "tienda_id": r["tienda_id"],
                 "nombre":    r["tienda__nombre"],
                 "total":     float(r["total"] or 0),
             }
-            for r in ventas_tienda
+            for r in (
+                venta_qs.filter(created_at__gte=inicio_periodo)
+                .values("tienda_id", "tienda__nombre")
+                .annotate(total=Sum("total"))
+                .order_by("-total")[:10]
+            )
         ]
 
         # ── Transacciones recientes (ventas + devoluciones) ─
@@ -404,8 +361,7 @@ class DashboardAdminView(APIView):
             venta_qs.order_by("-created_at")[:10]
             .values("numero_factura", "tienda__nombre", "total", "created_at")
         )
-        dev_qs = por_empresa_tienda(
-            Devolucion.objects.filter(estado="procesada"))
+        dev_qs = scope_qs(request, Devolucion.objects.filter(estado="procesada"))
         if tienda_id:
             dev_qs = dev_qs.filter(tienda_id=tienda_id)
         d_raw = list(
@@ -436,7 +392,11 @@ class DashboardAdminView(APIView):
         transacciones = transacciones[:15]
 
         # ── Desempeño por tienda ───────────────────────────
-        tienda_qs = por_empresa(Tienda.objects.filter(activo=True))
+        tienda_qs = scope_qs(
+            request,
+            Tienda.objects.filter(activo=True),
+            campo_empresa="empresa",
+        )
         if tienda_id:
             tienda_qs = tienda_qs.filter(id=tienda_id)
 
@@ -449,7 +409,7 @@ class DashboardAdminView(APIView):
 
             cajas_abiertas = SesionCaja.objects.filter(
                 tienda=t, estado="abierta").count()
-            cajas_hoy = SesionCaja.objects.filter(
+            cajas_hoy   = SesionCaja.objects.filter(
                 tienda=t, fecha_apertura__date=hoy).count()
             cajas_total = max(cajas_hoy, cajas_abiertas, 1)
             eficiencia  = round((cajas_abiertas / cajas_total) * 100)
@@ -462,12 +422,11 @@ class DashboardAdminView(APIView):
                 if encargado else "—"
             )
 
-            if eficiencia >= 90:
-                estado = "optimo"
-            elif eficiencia >= 60:
-                estado = "estable"
-            else:
-                estado = "moderado"
+            estado = (
+                "optimo"   if eficiencia >= 90
+                else "estable"  if eficiencia >= 60
+                else "moderado"
+            )
 
             desempeno.append({
                 "tienda_id":      t.id,
@@ -484,12 +443,12 @@ class DashboardAdminView(APIView):
 
         return Response({
             "kpis": {
-                "ventas_hoy":              float(ventas_hoy),
+                "ventas_hoy":               float(ventas_hoy),
                 "ventas_hoy_variacion_pct": variacion,
-                "inventario_bajo_sku":     stock_bajo,
-                "alertas_criticas":        stock_critico,
-                "balance_mensual":         balance_mensual,
-                "compras_pendientes":      compras_pendientes,
+                "inventario_bajo_sku":      stock_bajo,
+                "alertas_criticas":         stock_critico,
+                "balance_mensual":          balance_mensual,
+                "compras_pendientes":       compras_pendientes,
             },
             "periodo":                periodo,
             "ventas_por_tienda":       ventas_por_tienda,

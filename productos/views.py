@@ -1,26 +1,31 @@
-# productos/views.py
-
-from rest_framework import generics, status
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
-from django.db import transaction
-from django.db.models import Q, F, Sum
 from decimal import Decimal
 
-from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa
+from django.db import transaction
+from django.db.models import F, Q, Sum
+from django.http import HttpResponse
+from django.utils import timezone
+from rest_framework import generics, status
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
+from empresas.models import Empresa
+from tiendas.models import Tienda
+from ventas.models import DetalleVenta
 from .models import (
     Categoria, Producto, Inventario,
-    MovimientoInventario, generar_codigo_barras_interno
+    MovimientoInventario, generar_codigo_barras_interno,
 )
 from .serializers import (
     CategoriaSerializer, ProductoSerializer, ProductoSimpleSerializer,
     InventarioSerializer, AjusteInventarioSerializer,
-    MovimientoInventarioSerializer, ImportarProductoItemSerializer
+    MovimientoInventarioSerializer, ImportarProductoItemSerializer,
 )
 
 
-# ── Helper categoría ──────────────────────────────────────
+
 def _resolver_categoria(raw_nombre: str, empresa):
     nombre = ' '.join((raw_nombre or '').split())
     if not nombre:
@@ -29,15 +34,18 @@ def _resolver_categoria(raw_nombre: str, empresa):
         nombre__iexact=nombre, empresa=empresa
     ).first()
     if not categoria:
-        categoria = Categoria.objects.create(
-            nombre=nombre, empresa=empresa)
+        categoria = Categoria.objects.create(nombre=nombre, empresa=empresa)
     return categoria
 
 
 # ── Categorías ────────────────────────────────────────────
 class CategoriaListCreateView(generics.ListCreateAPIView):
-    serializer_class   = CategoriaSerializer
-    permission_classes = [EsAdminOSupervisor]
+    serializer_class = CategoriaSerializer
+
+    def get_permissions(self):
+        if self.request.method == "GET":
+            return [IsAuthenticated()]
+        return [EsAdminOSupervisor()]
 
     def get_queryset(self):
         if es_superadmin(self.request):
@@ -52,11 +60,8 @@ class CategoriaListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         if es_superadmin(self.request):
-            empresa_id = self.request.data.get("empresa")
-            if not empresa_id:
-                from rest_framework.exceptions import PermissionDenied
-                raise PermissionDenied(
-                    "El superadmin debe especificar una empresa.")
+            if not self.request.data.get("empresa"):
+                raise PermissionDenied("El superadmin debe especificar una empresa.")
             serializer.save()
         else:
             serializer.save(empresa=get_empresa(self.request))
@@ -69,8 +74,7 @@ class CategoriaDetailView(generics.RetrieveUpdateDestroyAPIView):
     def get_queryset(self):
         if es_superadmin(self.request):
             return Categoria.objects.all()
-        return Categoria.objects.filter(
-            empresa=get_empresa(self.request))
+        return Categoria.objects.filter(empresa=get_empresa(self.request))
 
 
 # ── Productos ─────────────────────────────────────────────
@@ -85,15 +89,13 @@ class ProductoListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if es_superadmin(self.request):
             empresa_id = self.request.query_params.get("empresa")
-            qs = Producto.objects.select_related(
-                "categoria", "empresa")        # ✅ select_related empresa
+            qs = Producto.objects.select_related("categoria", "empresa")
             if empresa_id:
                 qs = qs.filter(empresa_id=empresa_id)
         else:
-            empresa = get_empresa(self.request)
             qs = Producto.objects.select_related(
-                "categoria", "empresa"         # ✅ select_related empresa
-            ).filter(empresa=empresa)
+                "categoria", "empresa"
+            ).filter(empresa=get_empresa(self.request))
 
         activo = self.request.query_params.get("activo", "true")
         if activo == "true":
@@ -125,10 +127,7 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         if es_superadmin(self.request):
             empresa_id = self.request.data.get("empresa")
             if not empresa_id:
-                from rest_framework.exceptions import PermissionDenied
-                raise PermissionDenied(
-                    "El superadmin debe especificar una empresa.")
-            from empresas.models import Empresa
+                raise PermissionDenied("El superadmin debe especificar una empresa.")
             empresa = Empresa.objects.get(id=empresa_id)
         else:
             empresa = get_empresa(self.request)
@@ -136,7 +135,6 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         categoria = _resolver_categoria(
             self.request.data.get('categoria_nombre', ''), empresa)
 
-        # ✅ precio_mayoreo solo si empresa.maneja_mayoreo
         extra = {}
         if empresa.maneja_mayoreo:
             precio_mayoreo = self.request.data.get('precio_mayoreo')
@@ -152,11 +150,8 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         stock_maximo = self.request.data.get('stock_maximo', 0)
 
         if tienda_id:
-            from tiendas.models import Tienda
-            if not Tienda.objects.filter(
-                    id=tienda_id, empresa=empresa).exists():
-                from rest_framework import serializers
-                raise serializers.ValidationError(
+            if not Tienda.objects.filter(id=tienda_id, empresa=empresa).exists():
+                raise ValidationError(
                     {"tienda_id": "La tienda no pertenece a esta empresa."})
             Inventario.objects.update_or_create(
                 producto=producto, tienda_id=tienda_id,
@@ -174,10 +169,9 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def get_queryset(self):
         if es_superadmin(self.request):
-            return Producto.objects.select_related(
-                "categoria", "empresa")        # ✅
+            return Producto.objects.select_related("categoria", "empresa")
         return Producto.objects.select_related(
-            "categoria", "empresa"             # ✅
+            "categoria", "empresa"
         ).filter(empresa=get_empresa(self.request))
 
     @transaction.atomic
@@ -192,13 +186,11 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
         if raw_cat:
             extra['categoria'] = _resolver_categoria(raw_cat, empresa)
 
-        # ✅ Actualizar precio_mayoreo solo si empresa.maneja_mayoreo
         if empresa and empresa.maneja_mayoreo:
             precio_mayoreo = request.data.get('precio_mayoreo')
             if precio_mayoreo is not None:
                 extra['precio_mayoreo'] = Decimal(str(precio_mayoreo))
         else:
-            # Si la empresa no maneja mayoreo, limpiar el campo
             extra['precio_mayoreo'] = None
 
         serializer = self.get_serializer(
@@ -212,9 +204,7 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
         stock_maximo = request.data.get('stock_maximo')
 
         if tienda_id:
-            from tiendas.models import Tienda
-            if not Tienda.objects.filter(
-                    id=tienda_id, empresa=empresa).exists():
+            if not Tienda.objects.filter(id=tienda_id, empresa=empresa).exists():
                 return Response(
                     {"tienda_id": "La tienda no pertenece a esta empresa."},
                     status=status.HTTP_403_FORBIDDEN)
@@ -228,9 +218,7 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
                 defaults['stock_maximo'] = Decimal(str(stock_maximo))
             if defaults:
                 Inventario.objects.update_or_create(
-                    producto=producto,
-                    tienda_id=tienda_id,
-                    defaults=defaults)
+                    producto=producto, tienda_id=tienda_id, defaults=defaults)
 
         return Response(
             self.get_serializer(producto).data,
@@ -268,7 +256,7 @@ class ReactivarProductoView(APIView):
         producto.activo = True
         producto.save(update_fields=["activo"])
         return Response({
-            "detail": f"Producto '{producto.nombre}' reactivado. ✅",
+            "detail": f"Producto '{producto.nombre}' reactivado.",
             "id":     producto.id,
             "nombre": producto.nombre,
             "activo": producto.activo,
@@ -288,20 +276,15 @@ class BuscarProductoPOSView(APIView):
                 {"error": "Ingresa un término de búsqueda."}, status=400)
 
         if es_superadmin(request):
-            productos = Producto.objects.select_related(
-                "empresa"                      # ✅ para get_precio()
-            ).filter(
+            productos = Producto.objects.select_related("empresa").filter(
                 Q(codigo_barras=q) | Q(nombre__icontains=q),
                 activo=True,
             )[:10]
         else:
-            empresa   = get_empresa(request)
-            productos = Producto.objects.select_related(
-                "empresa"                      # ✅
-            ).filter(
+            productos = Producto.objects.select_related("empresa").filter(
                 Q(codigo_barras=q) | Q(nombre__icontains=q),
                 activo=True,
-                empresa=empresa,
+                empresa=get_empresa(request),
             )[:10]
 
         data = []
@@ -331,13 +314,7 @@ class InventarioListView(generics.ListAPIView):
     def get_queryset(self):
         qs = Inventario.objects.select_related(
             "producto", "producto__categoria", "tienda")
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+        qs = scope_qs(self.request, qs)
 
         tienda_id = self.request.query_params.get("tienda_id")
         alerta    = self.request.query_params.get("alerta")
@@ -426,22 +403,16 @@ class TopProductosView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from ventas.models import DetalleVenta
-
         tienda_id = request.query_params.get('tienda_id')
         fecha_ini = request.query_params.get('fecha_ini')
         fecha_fin = request.query_params.get('fecha_fin')
         limite    = int(request.query_params.get('limite', 20))
 
-        qs = DetalleVenta.objects.filter(venta__estado='completada')
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(venta__tienda__empresa_id=empresa_id)
-        else:
-            empresa = get_empresa(request)
-            qs = qs.filter(venta__tienda__empresa=empresa)
+        qs = scope_qs(
+            request,
+            DetalleVenta.objects.filter(venta__estado='completada'),
+            campo_empresa="venta__tienda__empresa",
+        )
 
         if request.user.rol == 'cajero':
             qs = qs.filter(venta__tienda_id=request.user.tienda_id)
@@ -452,9 +423,7 @@ class TopProductosView(APIView):
         if fecha_fin: qs = qs.filter(venta__created_at__date__lte=fecha_fin)
 
         resultado = (
-            qs.values(
-                'producto__nombre',
-                'producto__categoria__nombre')
+            qs.values('producto__nombre', 'producto__categoria__nombre')
             .annotate(
                 total_vendido  = Sum('cantidad'),
                 total_ingresos = Sum('subtotal'),
@@ -559,7 +528,6 @@ class ImportarProductosView(APIView):
                 return Response(
                     {"detail": "El superadmin debe especificar una empresa."},
                     status=status.HTTP_400_BAD_REQUEST)
-            from empresas.models import Empresa
             try:
                 empresa = Empresa.objects.get(id=empresa_id)
             except Empresa.DoesNotExist:
@@ -572,16 +540,13 @@ class ImportarProductosView(APIView):
         tienda_id = request.data.get("tienda_id")
         tienda    = None
         if tienda_id:
-            from tiendas.models import Tienda
             try:
-                tienda = Tienda.objects.get(
-                    id=tienda_id, empresa=empresa)
+                tienda = Tienda.objects.get(id=tienda_id, empresa=empresa)
             except Tienda.DoesNotExist:
                 return Response(
                     {"detail": "La tienda no pertenece a esta empresa."},
                     status=status.HTTP_400_BAD_REQUEST)
 
-        # ── Origen de datos: archivo Excel o JSON ──────────
         archivo = request.FILES.get("archivo")
         if archivo:
             nombre_archivo = archivo.name.lower()
@@ -632,10 +597,9 @@ class ImportarProductosView(APIView):
                     if not codigo:
                         codigo = generar_codigo_barras_interno()
 
-                    # ✅ precio_mayoreo en importación
-                    precio_mayoreo = None
-                    if empresa.maneja_mayoreo:
-                        precio_mayoreo = d.get("precio_mayoreo")
+                    precio_mayoreo = (
+                        d.get("precio_mayoreo") if empresa.maneja_mayoreo else None
+                    )
 
                     producto = Producto.objects.create(
                         empresa         = empresa,
@@ -645,7 +609,7 @@ class ImportarProductosView(APIView):
                         codigo_barras   = codigo,
                         precio_compra   = d.get("precio_compra", 0),
                         precio_venta    = d.get("precio_venta",  0),
-                        precio_mayoreo  = precio_mayoreo,   # ✅
+                        precio_mayoreo  = precio_mayoreo,
                         unidad_medida   = "unidad",
                         aplica_impuesto = False,
                     )
@@ -693,44 +657,26 @@ class ImportarProductosView(APIView):
 
 # ── Dashboard KPIs de inventario ──────────────────────────
 class DashboardInventarioView(APIView):
-    """
-    GET /productos/dashboard/
-    Retorna KPIs de inventario para el panel de administración.
-    Parámetros opcionales: tienda_id, empresa (solo superadmin)
-    """
-    permission_classes = [EsAdminOSupervisor]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from django.utils import timezone
-        from datetime import timedelta
-
         inicio_mes = timezone.now().replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
 
-        # ── Filtro base de inventario ──────────────────────
-        inv_qs = Inventario.objects.select_related(
-            "producto", "tienda")
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                inv_qs = inv_qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            inv_qs = inv_qs.filter(
-                tienda__empresa=get_empresa(request))
-
         tienda_id = request.query_params.get("tienda_id")
-        if tienda_id:
-            inv_qs = inv_qs.filter(tienda_id=tienda_id)
 
+        inv_qs, mov_qs = scope_qs(
+            request,
+            Inventario.objects.select_related("producto", "tienda"),
+            MovimientoInventario.objects.all(),
+            tienda_id=tienda_id,
+        )
         inv_qs = inv_qs.filter(producto__activo=True)
 
-        # ── KPI 1: Valor total del inventario ─────────────
         total_valor = inv_qs.aggregate(
             valor=Sum(F("stock_actual") * F("producto__precio_venta"))
         )["valor"] or 0
 
-        # ── KPI 2 y 3: Alertas de stock ───────────────────
         alertas_bajo = inv_qs.filter(
             stock_actual__lte=F("stock_minimo"),
             stock_actual__gt=0,
@@ -738,64 +684,34 @@ class DashboardInventarioView(APIView):
 
         alertas_criticas = inv_qs.filter(stock_actual__lte=0).count()
 
-        # ── Filtro base de movimientos ─────────────────────
-        mov_qs = MovimientoInventario.objects.all()
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                mov_qs = mov_qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            mov_qs = mov_qs.filter(
-                tienda__empresa=get_empresa(request))
-
-        if tienda_id:
-            mov_qs = mov_qs.filter(tienda_id=tienda_id)
-
-        mov_mes = mov_qs.filter(created_at__gte=inicio_mes)
-
-        # ── KPI 4: Ingresos del mes (entradas de stock) ───
+        mov_mes      = mov_qs.filter(created_at__gte=inicio_mes)
         ingresos_mes = mov_mes.filter(
             tipo="entrada"
         ).aggregate(total=Sum("cantidad"))["total"] or 0
 
-        # ── KPI 5: Pérdidas/daños del mes ─────────────────
         perdidas_valor = mov_mes.filter(
             tipo="dano"
         ).select_related("producto").aggregate(
             valor=Sum(F("cantidad") * F("producto__precio_compra"))
         )["valor"] or 0
 
-        # ── Productos nuevos registrados este mes ──────────
-        filtro_prod = {}
-        if not es_superadmin(request):
-            filtro_prod["empresa"] = get_empresa(request)
-        elif request.query_params.get("empresa"):
-            filtro_prod["empresa_id"] = request.query_params.get("empresa")
-
-        productos_mes = Producto.objects.filter(
-            created_at__gte=inicio_mes,
-            activo=True,
-            **filtro_prod,
+        prod_qs      = scope_qs(request, Producto.objects.all(), campo_empresa="empresa")
+        productos_mes = prod_qs.filter(
+            created_at__gte=inicio_mes, activo=True
         ).count()
 
         return Response({
-            "total_valor_inventario":  float(total_valor),
-            "alertas_stock_bajo":      alertas_bajo,
-            "alertas_criticas":        alertas_criticas,
-            "ingresos_mes_unidades":   float(ingresos_mes),
+            "total_valor_inventario":    float(total_valor),
+            "alertas_stock_bajo":        alertas_bajo,
+            "alertas_criticas":          alertas_criticas,
+            "ingresos_mes_unidades":     float(ingresos_mes),
             "productos_registrados_mes": productos_mes,
-            "perdidas_mes_valor":      float(perdidas_valor),
+            "perdidas_mes_valor":        float(perdidas_valor),
         })
 
 
 # ── Feed global de movimientos recientes ─────────────────
 class MovimientosRecientesView(generics.ListAPIView):
-    """
-    GET /productos/movimientos/recientes/
-    Devuelve los últimos movimientos de inventario de todos los
-    productos/tiendas. Soporta filtro por tienda_id y tipo.
-    """
     serializer_class   = MovimientoInventarioSerializer
     permission_classes = [EsAdminOSupervisor]
 
@@ -803,54 +719,114 @@ class MovimientosRecientesView(generics.ListAPIView):
         qs = MovimientoInventario.objects.select_related(
             "producto", "tienda", "empleado"
         )
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+        qs = scope_qs(self.request, qs)
 
         tienda_id = self.request.query_params.get("tienda_id")
         tipo      = self.request.query_params.get("tipo")
         limite    = int(self.request.query_params.get("limite", 20))
 
-        if tienda_id:
-            qs = qs.filter(tienda_id=tienda_id)
-        if tipo:
-            qs = qs.filter(tipo=tipo)
+        if tienda_id: qs = qs.filter(tienda_id=tienda_id)
+        if tipo:      qs = qs.filter(tipo=tipo)
 
         return qs.order_by("-created_at")[:limite]
 
 
+# ── Averías ───────────────────────────────────────────────
+class AveriasView(generics.ListAPIView):
+    serializer_class   = InventarioSerializer
+    permission_classes = [EsAdminOSupervisor]
+
+    def get_queryset(self):
+        qs = Inventario.objects.select_related(
+            "producto", "producto__categoria", "tienda"
+        ).filter(stock_averias__gt=0, producto__activo=True)
+        qs = scope_qs(self.request, qs)
+
+        tienda_id = self.request.query_params.get("tienda_id")
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+        return qs.order_by("-stock_averias")
+
+
+class RecuperarAveriaView(APIView):
+    permission_classes = [EsAdminOSupervisor]
+
+    @transaction.atomic
+    def post(self, request, producto_id, tienda_id):
+        accion   = request.data.get("accion")
+        cantidad = request.data.get("cantidad")
+
+        if accion not in ("recuperar", "descartar"):
+            return Response(
+                {"error": "accion debe ser 'recuperar' o 'descartar'."},
+                status=status.HTTP_400_BAD_REQUEST)
+        try:
+            cantidad = Decimal(str(cantidad))
+            if cantidad <= 0:
+                raise ValueError()
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Cantidad inválida."}, status=status.HTTP_400_BAD_REQUEST)
+
+        filtro = {"producto_id": producto_id, "tienda_id": tienda_id}
+        if not es_superadmin(request):
+            filtro["tienda__empresa"] = get_empresa(request)
+
+        try:
+            inv = Inventario.objects.select_for_update().get(**filtro)
+        except Inventario.DoesNotExist:
+            return Response(
+                {"error": "Producto no encontrado en esta tienda."},
+                status=status.HTTP_404_NOT_FOUND)
+
+        if cantidad > inv.stock_averias:
+            return Response(
+                {"error": f"Stock en averías insuficiente. "
+                          f"Disponible: {inv.stock_averias}."},
+                status=status.HTTP_400_BAD_REQUEST)
+
+        inv.stock_averias -= cantidad
+        if accion == "recuperar":
+            inv.stock_actual += cantidad
+        inv.save(update_fields=["stock_averias", "stock_actual"])
+
+        MovimientoInventario.objects.create(
+            producto_id=producto_id, tienda_id=tienda_id,
+            empleado=request.user,
+            tipo="entrada" if accion == "recuperar" else "salida",
+            cantidad=cantidad,
+            referencia_tipo=(
+                "recuperacion_averia" if accion == "recuperar"
+                else "descarte_averia"),
+            observacion=(
+                f"Recuperado de averías → stock normal"
+                if accion == "recuperar"
+                else "Descartado de averías (baja definitiva)"),
+        )
+
+        return Response({
+            "detail": (
+                "Unidades recuperadas al stock normal."
+                if accion == "recuperar"
+                else "Unidades dadas de baja definitivamente."),
+            "stock_actual":  float(inv.stock_actual),
+            "stock_averias": float(inv.stock_averias),
+        })
+
+
 # ── Exportar inventario a Excel ───────────────────────────
 class ExportarInventarioView(APIView):
-    """
-    GET /productos/inventario/exportar/
-    Descarga el inventario filtrado como un archivo .xlsx con formato
-    de tabla profesional (colores, alertas, totales).
-    Parámetros opcionales: tienda_id, alerta, activo, empresa (superadmin)
-    """
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        from django.http import HttpResponse
-        from django.utils import timezone
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
 
-        # ── Mismo filtrado que InventarioListView ──────────
         qs = Inventario.objects.select_related(
             "producto", "producto__categoria", "tienda", "tienda__empresa"
         )
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(request))
+        qs = scope_qs(request, qs)
 
         tienda_id = request.query_params.get("tienda_id")
         alerta    = request.query_params.get("alerta")
@@ -870,7 +846,6 @@ class ExportarInventarioView(APIView):
 
         inventarios = list(qs.order_by("tienda__nombre", "producto__nombre"))
 
-        # ── Nombre de empresa/tienda para el encabezado ───
         if not es_superadmin(request):
             empresa_nombre = get_empresa(request).nombre
         elif inventarios:
@@ -886,12 +861,10 @@ class ExportarInventarioView(APIView):
         else:
             tienda_label = "Todas las tiendas"
 
-        # ── Workbook ───────────────────────────────────────
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Inventario"
 
-        # Estilos
         C_AZUL_OSCURO = "1E3A5F"
         C_AZUL_MEDIO  = "2E86AB"
         C_FILA_PAR    = "EBF5FB"
@@ -940,7 +913,6 @@ class ExportarInventarioView(APIView):
         ultima_col = get_column_letter(N)
         now = timezone.now()
 
-        # ── Fila 1: Título ─────────────────────────────────
         ws.row_dimensions[1].height = 32
         ws.merge_cells(f"A1:{ultima_col}1")
         c = ws["A1"]
@@ -949,7 +921,6 @@ class ExportarInventarioView(APIView):
         c.fill      = fill(C_AZUL_OSCURO)
         c.alignment = ac
 
-        # ── Fila 2: Subtítulo ──────────────────────────────
         ws.row_dimensions[2].height = 20
         ws.merge_cells(f"A2:{ultima_col}2")
         c = ws["A2"]
@@ -962,7 +933,6 @@ class ExportarInventarioView(APIView):
         c.fill      = fill(C_AZUL_MEDIO)
         c.alignment = ac
 
-        # ── Fila 3: Headers de columnas ────────────────────
         ws.row_dimensions[3].height = 22
         for i, (nombre, ancho, _) in enumerate(COLUMNAS, start=1):
             col_letra = get_column_letter(i)
@@ -973,7 +943,6 @@ class ExportarInventarioView(APIView):
             c.alignment = ac
             c.border    = border()
 
-        # ── Filas de datos ─────────────────────────────────
         total_valor = 0.0
 
         for num, inv in enumerate(inventarios, start=1):
@@ -1003,8 +972,8 @@ class ExportarInventarioView(APIView):
                 fill_fila    = fill(C_FILA_PAR) if num % 2 == 0 else None
                 font_estado  = f_verde
 
-            categoria = inv.producto.categoria.nombre \
-                        if inv.producto.categoria else "Sin categoría"
+            categoria   = inv.producto.categoria.nombre \
+                          if inv.producto.categoria else "Sin categoría"
             actualizado = inv.updated_at.strftime("%d/%m/%Y %H:%M") \
                           if inv.updated_at else ""
 
@@ -1045,12 +1014,10 @@ class ExportarInventarioView(APIView):
                 if fmt:
                     c.number_format = fmt
 
-        # ── Fila de totales ────────────────────────────────
         fila_total = len(inventarios) + 4
         ws.row_dimensions[fila_total].height = 20
         ws.merge_cells(f"A{fila_total}:J{fila_total}")
-        c = ws.cell(row=fila_total, column=1,
-                    value="VALOR TOTAL DEL INVENTARIO")
+        c = ws.cell(row=fila_total, column=1, value="VALOR TOTAL DEL INVENTARIO")
         c.font      = f_bold
         c.fill      = fill(C_TOTAL)
         c.alignment = ar
@@ -1068,10 +1035,8 @@ class ExportarInventarioView(APIView):
             c.fill   = fill(C_TOTAL)
             c.border = border()
 
-        # ── Congelar encabezados ───────────────────────────
         ws.freeze_panes = "A4"
 
-        # ── Respuesta HTTP ─────────────────────────────────
         fecha_str = now.strftime("%Y%m%d_%H%M")
         response  = HttpResponse(
             content_type=(

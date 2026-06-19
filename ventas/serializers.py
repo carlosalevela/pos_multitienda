@@ -119,8 +119,6 @@ class VentaSerializer(serializers.ModelSerializer):
         total  = subtotal - descuento_total + impuesto_total
         vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
 
-
-
         empresa = self.context["request"].user.empresa
         numero  = Venta.generar_numero_factura(empresa)
 
@@ -325,12 +323,12 @@ class CambioPOSSerializer(serializers.Serializer):
 
             # ── PASO 5: Crear Devolucion (ya existe la venta) ─────────────────
             devolucion = Devolucion.objects.create(
-                venta             = venta,           # ✅ ya existe
+                venta             = venta,
                 tienda            = tienda,
                 empleado          = request.user,
-                tipo              = "cambio",        # ✅ campo correcto
-                total_devuelto    = total_devuelto,  # ✅ campo correcto
-                metodo_devolucion = "efectivo",      # ✅ campo requerido
+                tipo              = "cambio",
+                total_devuelto    = total_devuelto,
+                metodo_devolucion = "efectivo",
                 observaciones     = observaciones,
             )
 

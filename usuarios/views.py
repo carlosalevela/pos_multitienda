@@ -1,14 +1,13 @@
-# usuarios/views.py
-
 from rest_framework import generics
-from rest_framework.views import APIView
+from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.exceptions import ValidationError
-from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
 
-from core.permissions import EsAdmin, es_superadmin, get_empresa, PermissionDenied
+from core.permissions import EsAdmin, es_superadmin, get_empresa, scope_qs
+from empresas.models import Empresa
 from .models import Empleado
 from .serializers import EmpleadoSerializer, CrearEmpleadoSerializer, CustomTokenSerializer
 
@@ -64,21 +63,13 @@ class EmpleadoListCreateView(generics.ListCreateAPIView):
             if self.request.method == "POST" else EmpleadoSerializer
 
     def get_queryset(self):
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            qs = Empleado.objects.select_related("tienda", "empresa")
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-            return qs
-        return Empleado.objects.filter(
-            activo=True,
-            empresa=get_empresa(self.request),
-        ).select_related("tienda", "empresa")
+        qs = Empleado.objects.select_related("tienda", "empresa")
+        if not es_superadmin(self.request):
+            qs = qs.filter(activo=True)
+        return scope_qs(self.request, qs, campo_empresa="empresa")
 
     def perform_create(self, serializer):
         if es_superadmin(self.request):
-            from empresas.models import Empresa
-
             empresa_id = self.request.data.get("empresa")
             if not empresa_id:
                 raise PermissionDenied(
@@ -90,7 +81,7 @@ class EmpleadoListCreateView(generics.ListCreateAPIView):
                 raise ValidationError(
                     {"empresa": "La empresa especificada no existe."})
 
-            serializer.save(empresa=empresa)  # ✅ fix principal
+            serializer.save(empresa=empresa)
         else:
             serializer.save(empresa=get_empresa(self.request))
 

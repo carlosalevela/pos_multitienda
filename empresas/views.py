@@ -1,5 +1,3 @@
-# empresas/views.py
-
 from rest_framework import generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -52,7 +50,6 @@ class EmpresaDetailView(generics.RetrieveUpdateAPIView):
         return super().update(request, *args, **kwargs)
 
 
-# ✅ Endpoint dedicado para configuración de mayoreo
 class EmpresaConfigMayoreoView(APIView):
     """
     GET  /api/empresas/<id>/mayoreo/  → leer config actual

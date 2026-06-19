@@ -1,5 +1,3 @@
-# compras/serializers.py
-
 from rest_framework import serializers
 from .models import Proveedor, Compra, DetalleCompra
 from productos.models import Categoria
@@ -78,7 +76,6 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         if producto is None:
             return producto
         request = self.context.get("request")
-        # ✅ superadmin no tiene empresa asignada, omitir validación
         if request and not es_superadmin(request):
             if producto.empresa != request.user.empresa:
                 raise serializers.ValidationError(
@@ -136,7 +133,6 @@ class CompraSerializer(serializers.ModelSerializer):
 
     def validate_tienda(self, tienda):
         request = self.context.get("request")
-        # ✅ superadmin no tiene empresa asignada, omitir validación
         if request and not es_superadmin(request):
             if tienda.empresa != request.user.empresa:
                 raise serializers.ValidationError(
@@ -145,7 +141,6 @@ class CompraSerializer(serializers.ModelSerializer):
 
     def validate_proveedor(self, proveedor):
         request = self.context.get("request")
-        # ✅ superadmin no tiene empresa asignada, omitir validación
         if request and not es_superadmin(request):
             if proveedor.empresa != request.user.empresa:
                 raise serializers.ValidationError(

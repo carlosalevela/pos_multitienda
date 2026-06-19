@@ -87,13 +87,15 @@ class Inventario(models.Model):
     tienda       = models.ForeignKey(
         "tiendas.Tienda", on_delete=models.CASCADE,
         related_name="inventarios")
-    stock_actual = models.DecimalField(
+    stock_actual  = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
-    stock_minimo = models.DecimalField(
+    stock_averias = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
-    stock_maximo = models.DecimalField(
+    stock_minimo  = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
-    updated_at   = models.DateTimeField(auto_now=True)
+    stock_maximo  = models.DecimalField(
+        max_digits=12, decimal_places=2, default=0)
+    updated_at    = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.producto} - {self.tienda}: {self.stock_actual}"

@@ -1,35 +1,19 @@
-# devoluciones/views.py
-
 from decimal import Decimal
+
 from django.db import transaction
 from django.db.models import Sum
 from rest_framework import generics, status
-from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.permissions import es_superadmin, get_empresa
+from core.permissions import (
+    EsAdminOSupervisor, EsAdminSupervisorOCajero,
+    es_superadmin, get_empresa, scope_qs,
+)
 from productos.models import Inventario, MovimientoInventario, Producto
 from ventas.models import Venta
 from .models import Devolucion, DetalleDevolucion
 from .serializers import DevolucionSerializer
-
-
-# ── Permisos locales ──────────────────────────────────────
-# Estos se mantienen locales porque tienen lógica propia
-# que no encaja en los permisos genéricos de core
-class PuedeCrearDevolucion(BasePermission):
-    def has_permission(self, request, view):
-        return (request.user and request.user.is_authenticated and
-                request.user.rol in (
-                    "superadmin", "admin", "supervisor", "cajero"))
-
-
-class PuedeCancelarDevolucion(BasePermission):
-    def has_permission(self, request, view):
-        return (request.user and request.user.is_authenticated and
-                request.user.rol in (
-                    "superadmin", "admin", "supervisor"))
 
 
 # ── Helpers ───────────────────────────────────────────────
@@ -48,18 +32,19 @@ def _restaurar_stock(devolucion: Devolucion, empleado, venta) -> None:
                 producto=detalle.producto,
                 tienda=devolucion.tienda,
                 stock_actual=Decimal("0"),
+                stock_averias=Decimal("0"),
                 stock_minimo=Decimal("0"),
                 stock_maximo=Decimal("0"),
             )
-        inv.stock_actual += detalle.cantidad
-        inv.save(update_fields=["stock_actual"])
+        inv.stock_averias += detalle.cantidad
+        inv.save(update_fields=["stock_averias"])
         MovimientoInventario.objects.create(
             producto=detalle.producto, tienda=devolucion.tienda,
-            empleado=empleado, tipo="entrada",
+            empleado=empleado, tipo="dano",
             cantidad=detalle.cantidad, referencia_tipo="devolucion",
             referencia_id=devolucion.id,
             observacion=f"Devolución DEV-{devolucion.id} | "
-                        f"{venta.numero_factura}",
+                        f"{venta.numero_factura} → avería",
         )
 
 
@@ -70,35 +55,31 @@ def _revertir_stock(devolucion: Devolucion, empleado) -> None:
             tienda=devolucion.tienda,
         ).first()
         if inv:
-            inv.stock_actual = max(
-                Decimal("0"), inv.stock_actual - detalle.cantidad)
-            inv.save(update_fields=["stock_actual"])
+            inv.stock_averias = max(
+                Decimal("0"), inv.stock_averias - detalle.cantidad)
+            inv.save(update_fields=["stock_averias"])
         MovimientoInventario.objects.create(
             producto=detalle.producto, tienda=devolucion.tienda,
-            empleado=empleado, tipo="salida",
+            empleado=empleado, tipo="ajuste",
             cantidad=detalle.cantidad,
             referencia_tipo="cancelacion_devolucion",
             referencia_id=devolucion.id,
-            observacion=f"Cancelación DEV-{devolucion.id}",
+            observacion=f"Cancelación DEV-{devolucion.id} | avería revertida",
         )
 
 
 # ── Mixin base ────────────────────────────────────────────
 class _DevolucionMixin:
     def get_base_queryset(self):
-        qs = Devolucion.objects.select_related(
-            "venta", "tienda", "empleado"
-        ).prefetch_related("detalles__producto")
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
-            if self.request.user.rol in ("supervisor", "cajero"):
-                qs = qs.filter(tienda_id=self.request.user.tienda_id)
-
+        qs = scope_qs(
+            self.request,
+            Devolucion.objects.select_related(
+                "venta", "tienda", "empleado"
+            ).prefetch_related("detalles__producto"),
+        )
+        if (not es_superadmin(self.request) and
+                self.request.user.rol in ("supervisor", "cajero")):
+            qs = qs.filter(tienda_id=self.request.user.tienda_id)
         return qs
 
     def get_serializer_context(self):
@@ -109,7 +90,7 @@ class _DevolucionMixin:
 
 # ── Crear devolución ──────────────────────────────────────
 class CrearDevolucionView(APIView):
-    permission_classes = [PuedeCrearDevolucion]
+    permission_classes = [EsAdminSupervisorOCajero]
 
     @transaction.atomic
     def post(self, request):
@@ -178,16 +159,16 @@ class CrearDevolucionView(APIView):
         _restaurar_stock(devolucion, request.user, venta)
 
         return Response({
-            "detail":          "Devolución procesada correctamente. ✅",
+            "detail":          "Devolución procesada correctamente.",
             "devolucion_id":   devolucion.id,
             "venta":           venta.numero_factura,
             "total_devuelto":  float(devolucion.total_devuelto),
             "metodo":          devolucion.metodo_devolucion,
             "productos_devueltos": [
                 {
-                    "producto":  d.producto.nombre,
-                    "cantidad":  float(d.cantidad),
-                    "subtotal":  float(d.subtotal),
+                    "producto": d.producto.nombre,
+                    "cantidad": float(d.cantidad),
+                    "subtotal": float(d.subtotal),
                 }
                 for d in devolucion.detalles.select_related("producto")
             ],
@@ -196,7 +177,7 @@ class CrearDevolucionView(APIView):
 
 # ── Cambio de producto ────────────────────────────────────
 class CambioProductoView(APIView):
-    permission_classes = [PuedeCrearDevolucion]
+    permission_classes = [EsAdminSupervisorOCajero]
 
     @transaction.atomic
     def post(self, request):
@@ -309,14 +290,14 @@ class CambioProductoView(APIView):
                           f"solicitado: {cantidad_reemplazo}."},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        total_reemplazo  = producto_reemplazo.precio_venta * cantidad_reemplazo
-        diferencia       = total_reemplazo - total_devuelto
-        tipo_diferencia  = ("cobrar" if diferencia > 0
-                            else "devolver" if diferencia < 0
-                            else "exacto")
+        total_reemplazo        = producto_reemplazo.precio_venta * cantidad_reemplazo
+        diferencia             = total_reemplazo - total_devuelto
+        tipo_diferencia        = ("cobrar"   if diferencia > 0
+                                  else "devolver" if diferencia < 0
+                                  else "exacto")
         metodo_pago_diferencia = request.data.get(
             "metodo_pago_diferencia", "") or ""
-        monto_recibido = request.data.get("monto_recibido", None)
+        monto_recibido         = request.data.get("monto_recibido", None)
 
         if monto_recibido in ("", None):
             monto_recibido = None
@@ -390,31 +371,31 @@ class CambioProductoView(APIView):
         )
 
         return Response({
-            "detail":               "Cambio procesado correctamente. ✅",
-            "devolucion_id":        devolucion.id,
-            "venta":                venta.numero_factura,
-            "tipo":                 devolucion.tipo,
-            "total_devuelto":       float(total_devuelto),
-            "total_reemplazo":      float(total_reemplazo),
-            "diferencia":           float(abs(diferencia)),
-            "tipo_diferencia":      tipo_diferencia,
+            "detail":                 "Cambio procesado correctamente.",
+            "devolucion_id":          devolucion.id,
+            "venta":                  venta.numero_factura,
+            "tipo":                   devolucion.tipo,
+            "total_devuelto":         float(total_devuelto),
+            "total_reemplazo":        float(total_reemplazo),
+            "diferencia":             float(abs(diferencia)),
+            "tipo_diferencia":        tipo_diferencia,
             "metodo_pago_diferencia": metodo_pago_diferencia or None,
-            "monto_recibido":       float(monto_recibido)
-                                    if monto_recibido is not None else None,
-            "cambio_entregado":     float(cambio_entregado),
+            "monto_recibido":         float(monto_recibido)
+                                      if monto_recibido is not None else None,
+            "cambio_entregado":       float(cambio_entregado),
             "producto_reemplazo": {
-                "id":             producto_reemplazo.id,
-                "nombre":         producto_reemplazo.nombre,
-                "cantidad":       float(cantidad_reemplazo),
+                "id":              producto_reemplazo.id,
+                "nombre":          producto_reemplazo.nombre,
+                "cantidad":        float(cantidad_reemplazo),
                 "precio_unitario": float(producto_reemplazo.precio_venta),
-                "total":          float(total_reemplazo),
+                "total":           float(total_reemplazo),
             },
         }, status=status.HTTP_201_CREATED)
 
 
 # ── Cancelar devolución ───────────────────────────────────
 class CancelarDevolucionView(APIView):
-    permission_classes = [PuedeCancelarDevolucion]
+    permission_classes = [EsAdminOSupervisor]
 
     @transaction.atomic
     def post(self, request, pk):
@@ -446,7 +427,7 @@ class CancelarDevolucionView(APIView):
         devolucion.save(update_fields=["estado"])
 
         return Response({
-            "detail":        "Devolución cancelada. El stock fue revertido. ✅",
+            "detail":        "Devolución cancelada. El stock fue revertido.",
             "devolucion_id": devolucion.id,
         }, status=status.HTTP_200_OK)
 
@@ -454,21 +435,20 @@ class CancelarDevolucionView(APIView):
 # ── Listado de devoluciones ───────────────────────────────
 class DevolucionListView(_DevolucionMixin, generics.ListAPIView):
     serializer_class   = DevolucionSerializer
-    permission_classes = [PuedeCrearDevolucion]
+    permission_classes = [EsAdminSupervisorOCajero]
 
     def get_queryset(self):
         qs = self.get_base_queryset()
         p  = self.request.query_params
 
-        # superadmin y admin pueden filtrar por tienda
         if self.request.user.rol in ("superadmin", "admin"):
             if tienda_id := p.get("tienda_id"):
                 qs = qs.filter(tienda_id=tienda_id)
 
-        if estado   := p.get("estado"):    qs = qs.filter(estado=estado)
-        if fecha    := p.get("fecha"):     qs = qs.filter(created_at__date=fecha)
-        if fecha_ini := p.get("fechaIni"): qs = qs.filter(created_at__date__gte=fecha_ini)
-        if fecha_fin := p.get("fechaFin"): qs = qs.filter(created_at__date__lte=fecha_fin)
+        if estado    := p.get("estado"):    qs = qs.filter(estado=estado)
+        if fecha     := p.get("fecha"):     qs = qs.filter(created_at__date=fecha)
+        if fecha_ini := p.get("fechaIni"):  qs = qs.filter(created_at__date__gte=fecha_ini)
+        if fecha_fin := p.get("fechaFin"):  qs = qs.filter(created_at__date__lte=fecha_fin)
 
         return qs.order_by("-created_at")
 
@@ -476,7 +456,7 @@ class DevolucionListView(_DevolucionMixin, generics.ListAPIView):
 # ── Detalle de devolución ─────────────────────────────────
 class DevolucionDetailView(_DevolucionMixin, generics.RetrieveAPIView):
     serializer_class   = DevolucionSerializer
-    permission_classes = [PuedeCrearDevolucion]
+    permission_classes = [EsAdminSupervisorOCajero]
 
     def get_queryset(self):
         return self.get_base_queryset()

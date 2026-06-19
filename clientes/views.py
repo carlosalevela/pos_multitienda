@@ -1,23 +1,20 @@
-# clientes/views.py
+from datetime import timedelta
+from decimal import Decimal
 
-from rest_framework import generics
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
 from django.db import transaction
 from django.db.models import Q
-from decimal import Decimal
 from django.utils import timezone
-from datetime import timedelta
+from rest_framework import generics
 from rest_framework.exceptions import ValidationError
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
-from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa
+from caja.models import SesionCaja, MovimientoCaja
+from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
 from productos.models import Inventario, MovimientoInventario
 from .models import Cliente, Separado, AbonoSeparado
-from .serializers import (
-    ClienteSerializer, ClienteSimpleSerializer,
-    SeparadoSerializer,
-)
+from .serializers import ClienteSerializer, ClienteSimpleSerializer, SeparadoSerializer
 
 
 # ── Helper empleado ───────────────────────────────────────
@@ -33,16 +30,12 @@ class ClienteListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Cliente.objects.filter(activo=True)
+        qs = scope_qs(
+            self.request,
+            Cliente.objects.filter(activo=True),
+            campo_empresa="empresa",
+        )
 
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-        else:
-            qs = qs.filter(empresa=get_empresa(self.request))
-
-        # ✅ Filtro por tienda
         tienda_id = self.request.query_params.get("tienda_id")
         if tienda_id:
             qs = qs.filter(tienda_id=tienda_id)
@@ -56,6 +49,7 @@ class ClienteListCreateView(generics.ListCreateAPIView):
                 Q(telefono__icontains=q)
             )
         return qs.order_by("nombre")
+
     def perform_create(self, serializer):
         if es_superadmin(self.request):
             serializer.save()
@@ -95,15 +89,11 @@ class ClienteSimpleListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Cliente.objects.filter(activo=True)
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(empresa_id=empresa_id)
-        else:
-            qs = qs.filter(empresa=get_empresa(self.request))
-
+        qs = scope_qs(
+            self.request,
+            Cliente.objects.filter(activo=True),
+            campo_empresa="empresa",
+        )
         q = self.request.query_params.get("q")
         if q:
             qs = qs.filter(
@@ -117,16 +107,12 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        qs = Separado.objects.select_related(
-            "cliente", "tienda", "empleado"
-        ).prefetch_related("detalles", "abonos")
-
-        if es_superadmin(self.request):
-            empresa_id = self.request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(self.request))
+        qs = scope_qs(
+            self.request,
+            Separado.objects.select_related(
+                "cliente", "tienda", "empleado"
+            ).prefetch_related("detalles", "abonos"),
+        )
 
         tienda_id      = self.request.query_params.get("tienda_id")
         estado         = self.request.query_params.get("estado")
@@ -184,7 +170,6 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
                 separado.save()
 
                 # ── Registrar en caja si hay sesión abierta ──
-                from caja.models import SesionCaja, MovimientoCaja
                 sesion = SesionCaja.objects.filter(
                     tienda_id = separado.tienda_id,
                     estado    = 'abierta',
@@ -280,7 +265,6 @@ class AbonarSeparadoView(APIView):
 
         separado.save()
 
-        from caja.models import SesionCaja, MovimientoCaja
         sesion = SesionCaja.objects.filter(
             tienda_id=separado.tienda_id,
             estado="abierta",
@@ -362,7 +346,6 @@ class CancelarSeparadoView(APIView):
             )
 
         if separado.abono_acumulado > 0:
-            from caja.models import SesionCaja, MovimientoCaja
             sesion = SesionCaja.objects.filter(
                 tienda_id=separado.tienda_id,
                 estado="abierta",
@@ -386,8 +369,7 @@ class CancelarSeparadoView(APIView):
         separado.save()
 
         return Response({
-            "detail": f"Separado #{separado.id} cancelado. "
-                      f"Stock restaurado. ✅",
+            "detail": f"Separado #{separado.id} cancelado. Stock restaurado.",
             "productos_restaurados": [
                 {
                     "producto": d.producto.nombre,
@@ -406,17 +388,13 @@ class AlertasSeparadosView(APIView):
         hoy     = timezone.now().date()
         en3dias = hoy + timedelta(days=3)
 
-        qs = Separado.objects.filter(
-            estado='activo',
-            fecha_limite__isnull=False,
-        ).select_related('cliente', 'tienda')
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(tienda__empresa=get_empresa(request))
+        qs = scope_qs(
+            request,
+            Separado.objects.filter(
+                estado='activo',
+                fecha_limite__isnull=False,
+            ).select_related('cliente', 'tienda'),
+        )
 
         if request.user.rol == 'cajero':
             qs = qs.filter(tienda_id=request.user.tienda_id)
@@ -459,17 +437,11 @@ class AbonosPorFechaView(APIView):
             return Response(
                 {"error": "Parámetro 'fecha' requerido."}, status=400)
 
-        qs = AbonoSeparado.objects.select_related(
-            "separado__cliente", "empleado")
-
-        if es_superadmin(request):
-            empresa_id = request.query_params.get("empresa")
-            if empresa_id:
-                qs = qs.filter(
-                    separado__tienda__empresa_id=empresa_id)
-        else:
-            qs = qs.filter(
-                separado__tienda__empresa=get_empresa(request))
+        qs = scope_qs(
+            request,
+            AbonoSeparado.objects.select_related("separado__cliente", "empleado"),
+            campo_empresa="separado__tienda__empresa",
+        )
 
         qs = qs.filter(created_at__date=fecha)
 

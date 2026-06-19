@@ -6,7 +6,7 @@ from .views import (
     AjustarInventarioView, MovimientosProductoView,
     TopProductosView, ReactivarProductoView, ImportarProductosView,
     DashboardInventarioView, MovimientosRecientesView,
-    ExportarInventarioView,
+    ExportarInventarioView, AveriasView, RecuperarAveriaView,
 )
 
 urlpatterns = [
@@ -37,6 +37,14 @@ urlpatterns = [
 
     # Movimientos recientes (feed global)
     path("movimientos/recientes/", MovimientosRecientesView.as_view(), name="movimientos_recientes"),
+
+    # Averías
+    path("averias/", AveriasView.as_view(), name="averias"),
+    path(
+        "<int:producto_id>/inventario/<int:tienda_id>/recuperar-averia/",
+        RecuperarAveriaView.as_view(),
+        name="recuperar_averia",
+    ),
 
     # Analytics / Dashboard
     path("top-productos/",  TopProductosView.as_view(),        name="top-productos"),

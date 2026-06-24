@@ -135,7 +135,11 @@ class VentaSerializer(serializers.ModelSerializer):
         )
 
         for d in detalles_data:
-            DetalleVenta.objects.create(venta=venta, **d)
+            DetalleVenta.objects.create(
+                venta=venta,
+                costo_unitario=d["producto"].precio_compra,
+                **d,
+            )
 
         return venta
 
@@ -302,6 +306,7 @@ class CambioPOSSerializer(serializers.Serializer):
                     producto        = producto,
                     cantidad        = cantidad,
                     precio_unitario = d["precio_unitario"],
+                    costo_unitario  = producto.precio_compra,
                     descuento       = d.get("descuento", Decimal("0")),
                     subtotal        = (d["precio_unitario"] - d.get("descuento", Decimal("0"))) * cantidad,
                 )

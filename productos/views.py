@@ -687,13 +687,23 @@ class DashboardInventarioView(APIView):
         mov_mes      = mov_qs.filter(created_at__gte=inicio_mes)
         ingresos_mes = mov_mes.filter(
             tipo="entrada"
+        ).exclude(
+            referencia_tipo="recuperacion_averia"
         ).aggregate(total=Sum("cantidad"))["total"] or 0
 
-        perdidas_valor = mov_mes.filter(
+        perdidas_brutas = mov_mes.filter(
             tipo="dano"
         ).select_related("producto").aggregate(
             valor=Sum(F("cantidad") * F("producto__precio_compra"))
         )["valor"] or 0
+
+        recuperado = mov_mes.filter(
+            referencia_tipo="recuperacion_averia"
+        ).select_related("producto").aggregate(
+            valor=Sum(F("cantidad") * F("producto__precio_compra"))
+        )["valor"] or 0
+
+        perdidas_valor = max(0.0, float(perdidas_brutas) - float(recuperado))
 
         prod_qs      = scope_qs(request, Producto.objects.all(), campo_empresa="empresa")
         productos_mes = prod_qs.filter(

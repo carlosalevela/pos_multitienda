@@ -112,6 +112,7 @@ class DetalleVenta(models.Model):
     producto        = models.ForeignKey("productos.Producto", on_delete=models.PROTECT)
     cantidad        = models.DecimalField(max_digits=10, decimal_places=2)
     precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
+    costo_unitario  = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     descuento       = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     subtotal        = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 

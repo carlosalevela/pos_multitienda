@@ -12,7 +12,7 @@ class GastoSerializer(serializers.ModelSerializer):
             "id", "tienda", "tienda_nombre",
             "sesion_caja", "empleado", "empleado_nombre",
             "categoria", "descripcion",
-            "monto", "metodo_pago","visibilidad","created_at"
+            "monto", "metodo_pago", "visibilidad", "tipo_gasto", "created_at",
         ]
         read_only_fields = ["id", "empleado", "created_at"]
 

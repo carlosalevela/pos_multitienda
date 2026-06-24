@@ -310,6 +310,58 @@ class ResumenCierreView(APIView):
         })
 
 
+# ── Gastos de una sesión (cajero y superiores) ───────────────
+class SesionGastosView(APIView):
+    """
+    GET /api/caja/{pk}/gastos/
+    Devuelve los gastos registrados en una sesión de caja.
+    Accesible para el cajero dueño del turno, supervisor y admin.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        filtro = {"pk": pk}
+        if not es_superadmin(request):
+            filtro["tienda__empresa"] = get_empresa(request)
+
+        try:
+            sesion = SesionCaja.objects.select_related("tienda", "empleado").get(**filtro)
+        except SesionCaja.DoesNotExist:
+            return Response({"error": "Sesión no encontrada."}, status=404)
+
+        # Cajero solo puede ver su propio turno
+        if request.user.rol == "cajero" and sesion.empleado_id != request.user.id:
+            return Response({"error": "No tienes permiso para ver esta sesión."}, status=403)
+
+        qs = Gasto.objects.filter(sesion_caja=sesion).order_by("-created_at")
+
+        # Cajero solo ve gastos con visibilidad='todos'
+        if request.user.rol == "cajero":
+            qs = qs.filter(visibilidad="todos")
+
+        gastos = list(qs.values(
+            "id", "categoria", "descripcion",
+            "monto", "metodo_pago", "visibilidad", "tipo_gasto", "created_at",
+        ))
+
+        totales = qs.aggregate(
+            total=Sum("monto"),
+            efectivo=Sum("monto", filter=Q(metodo_pago="efectivo")),
+            otros=Sum("monto", filter=~Q(metodo_pago="efectivo")),
+        )
+
+        return Response({
+            "sesion_id": sesion.id,
+            "gastos":    gastos,
+            "resumen": {
+                "total":    float(totales["total"]    or 0),
+                "efectivo": float(totales["efectivo"] or 0),
+                "otros":    float(totales["otros"]    or 0),
+                "cantidad": len(gastos),
+            },
+        })
+
+
 # ── Dashboard de Caja (Admin / Superadmin) ────────────────────
 class DashboardCajaView(APIView):
     permission_classes = [EsAdminOSupervisor]

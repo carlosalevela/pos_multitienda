@@ -380,6 +380,49 @@ class CancelarSeparadoView(APIView):
         })
 
 
+# ── Resumen de cliente (para POS y separados) ─────────────
+class ClienteResumenView(APIView):
+    """
+    GET /api/clientes/{pk}/resumen/
+    Devuelve info básica del cliente + conteo de separados activos.
+    Útil para el badge 'X apartados pendientes' en POS y separados.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        filtro = {"pk": pk}
+        if not es_superadmin(request):
+            filtro["empresa"] = get_empresa(request)
+        try:
+            cliente = Cliente.objects.get(**filtro)
+        except Cliente.DoesNotExist:
+            return Response({"error": "Cliente no encontrado."}, status=404)
+
+        separados_qs = Separado.objects.filter(cliente=cliente)
+        activos      = separados_qs.filter(estado="activo")
+
+        deuda_total = sum(s.saldo_pendiente for s in activos)
+
+        ultimo = separados_qs.order_by("-created_at").first()
+
+        return Response({
+            "id":               cliente.id,
+            "nombre":           f"{cliente.nombre} {cliente.apellido}",
+            "cedula_nit":       cliente.cedula_nit,
+            "telefono":         cliente.telefono,
+            "separados_activos":  activos.count(),
+            "deuda_total":      float(deuda_total),
+            "ultimo_separado":  {
+                "id":              ultimo.id,
+                "total":           float(ultimo.total),
+                "saldo_pendiente": float(ultimo.saldo_pendiente),
+                "estado":          ultimo.estado,
+                "fecha_limite":    str(ultimo.fecha_limite) if ultimo.fecha_limite else None,
+                "created_at":      str(ultimo.created_at),
+            } if ultimo else None,
+        })
+
+
 # ── Alertas de separados ──────────────────────────────────
 class AlertasSeparadosView(APIView):
     permission_classes = [IsAuthenticated]

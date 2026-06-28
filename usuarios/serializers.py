@@ -93,13 +93,27 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
         token["rol"] = user.rol
         token["tienda_id"] = user.tienda_id
         token["tienda_nombre"] = user.tienda.nombre if user.tienda else ""
-        token["empresa_id"] = user.empresa_id
-        token["empresa_nombre"] = user.empresa.nombre if user.empresa else ""
+        # Fallback: si empresa no está asignada directamente, inferir desde tienda
+        empresa_id = user.empresa_id
+        if not empresa_id and user.tienda_id:
+            empresa_id = user.tienda.empresa_id
+        token["empresa_id"] = empresa_id
+        token["empresa_nombre"] = (
+            user.empresa.nombre if user.empresa else
+            (user.tienda.empresa.nombre if user.tienda and user.tienda.empresa else "")
+        )
         return token
 
     def validate(self, attrs):
         data = super().validate(attrs)
         empleado = self.user
+        empresa_id = empleado.empresa_id
+        if not empresa_id and empleado.tienda_id:
+            empresa_id = empleado.tienda.empresa_id
+        empresa_nombre = (
+            empleado.empresa.nombre if empleado.empresa else
+            (empleado.tienda.empresa.nombre if empleado.tienda and empleado.tienda.empresa else "")
+        )
         data["empleado"] = {
             "id": empleado.id,
             "nombre": empleado.nombre,
@@ -108,7 +122,7 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
             "rol": empleado.rol,
             "tienda_id": empleado.tienda_id,
             "tienda_nombre": empleado.tienda.nombre if empleado.tienda else "",
-            "empresa_id": empleado.empresa_id,
-            "empresa_nombre": empleado.empresa.nombre if empleado.empresa else "",
+            "empresa_id": empresa_id,
+            "empresa_nombre": empresa_nombre,
         }
         return data

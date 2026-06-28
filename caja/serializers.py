@@ -156,26 +156,37 @@ class SesionCajaSerializer(serializers.ModelSerializer):
 
     # ── Devoluciones ──────────────────────────────────────────
 
+    def _dev_efectivo_neto(self, obj) -> Decimal:
+        """Neto de devoluciones en efectivo para esta sesión.
+
+        Cacheado en la instancia del serializer para evitar repetir las 3
+        queries cuando tanto `devoluciones_efectivo` como `monto_esperado`
+        lo necesitan en la misma serialización.
+        """
+        if not hasattr(self, "_dev_ef_cache"):
+            from devoluciones.models import Devolucion
+            base = Devolucion.objects.filter(
+                venta__sesion_caja=obj, estado="procesada"
+            )
+            dev      = base.filter(
+                tipo="devolucion", metodo_devolucion="efectivo",
+            ).aggregate(t=Sum("total_devuelto"))["t"] or 0
+
+            cobrar   = base.filter(
+                tipo="cambio", tipo_diferencia="cobrar",
+                metodo_pago_diferencia="efectivo",
+            ).aggregate(t=Sum("diferencia"))["t"] or 0
+
+            devolver = base.filter(
+                tipo="cambio", tipo_diferencia="devolver",
+                metodo_pago_diferencia="efectivo",
+            ).aggregate(t=Sum("diferencia"))["t"] or 0
+
+            self._dev_ef_cache = Decimal(str(dev + devolver - cobrar))
+        return self._dev_ef_cache
+
     def get_devoluciones_efectivo(self, obj):
-        from devoluciones.models import Devolucion
-        dev = Devolucion.objects.filter(
-            venta__sesion_caja=obj, estado="procesada",
-            tipo="devolucion", metodo_devolucion="efectivo",
-        ).aggregate(t=Sum("total_devuelto"))["t"] or 0
-
-        cobrar   = Devolucion.objects.filter(
-            venta__sesion_caja=obj, estado="procesada",
-            tipo="cambio", tipo_diferencia="cobrar",
-            metodo_pago_diferencia="efectivo",
-        ).aggregate(t=Sum("diferencia"))["t"] or 0
-
-        devolver = Devolucion.objects.filter(
-            venta__sesion_caja=obj, estado="procesada",
-            tipo="cambio", tipo_diferencia="devolver",
-            metodo_pago_diferencia="efectivo",
-        ).aggregate(t=Sum("diferencia"))["t"] or 0
-
-        return float(dev + devolver - cobrar)
+        return float(self._dev_efectivo_neto(obj))
 
     def get_num_devoluciones(self, obj):
         from devoluciones.models import Devolucion
@@ -204,7 +215,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         v_mx   = vsum(base_v.filter(metodo_pago="mixto"))
         g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
         a_ef   = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
-        dev_ef = Decimal(str(self.get_devoluciones_efectivo(obj)))
+        dev_ef = self._dev_efectivo_neto(obj)   # reutiliza el resultado cacheado
         return float(obj.monto_inicial + v_ef + v_mx + a_ef - g_ef - dev_ef)
 
 

@@ -36,6 +36,37 @@ MESES = [
 ]
 
 
+def _cajas_abiertas(request, tienda_id, fecha_fin):
+    """
+    Devuelve lista de SesionCaja abiertas si fecha_fin >= hoy.
+    Vacía para reportes históricos (datos ya cerrados, sin riesgo).
+    Usado para bloquear exports y advertir en reportes JSON.
+    """
+    from datetime import date as _date
+    today = timezone.now().date()
+    try:
+        fd = _date.fromisoformat(str(fecha_fin)) if fecha_fin else today
+    except (ValueError, TypeError):
+        return []
+    if fd < today:
+        return []
+
+    qs = SesionCaja.objects.filter(estado="abierta").select_related("tienda", "empleado")
+    if not es_superadmin(request):
+        qs = qs.filter(tienda__empresa=get_empresa(request))
+    if tienda_id:
+        qs = qs.filter(tienda_id=tienda_id)
+
+    return [
+        {
+            "sesion_id": s.id,
+            "tienda":    s.tienda.nombre,
+            "empleado":  f"{s.empleado.nombre} {s.empleado.apellido}" if s.empleado else "—",
+            "desde":     s.fecha_apertura.strftime("%H:%M"),
+        }
+        for s in qs
+    ]
+
 
 # ── Gastos ────────────────────────────────────────────────────
 class GastoListCreateView(generics.ListCreateAPIView):
@@ -177,6 +208,7 @@ class ResumenDiarioView(APIView):
                 for d in dev_por_metodo
             ],
             "gastos_por_categoria": gastos_por_categoria,
+            "advertencia_cajas_abiertas": _cajas_abiertas(request, tienda_id, str(fecha)),
         })
 
 
@@ -530,8 +562,9 @@ class EstadoResultadosView(APIView):
                 "valor_recuperado": float(valor_recuperado),
                 "perdida_neta":     float(perdida_neta_averias),
             },
-            "utilidad_operativa":     float(utilidad_operativa),
-            "utilidad_operativa_pct": utilidad_operativa_pct,
+            "utilidad_operativa":          float(utilidad_operativa),
+            "utilidad_operativa_pct":      utilidad_operativa_pct,
+            "advertencia_cajas_abiertas":  _cajas_abiertas(request, tienda_id, fecha_fin),
         })
 
 
@@ -965,7 +998,8 @@ class FlujoCajaView(APIView):
                 "total_diferencias": total_dif,
                 "num_sesiones":      len(sesiones),
             },
-            "sesiones": sesiones,
+            "sesiones":                   sesiones,
+            "advertencia_cajas_abiertas": _cajas_abiertas(request, tienda_id, fecha_fin),
         })
 
 
@@ -1176,6 +1210,17 @@ class ExportarContabilidadView(APIView):
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
+
+        cajas = _cajas_abiertas(request, tienda_id, fecha_fin)
+        if cajas:
+            nombres = ", ".join(c["tienda"] for c in cajas)
+            return Response({
+                "error": (
+                    f"Hay cajas abiertas en: {nombres}. "
+                    "Ciérralas antes de exportar el reporte para evitar datos incompletos."
+                ),
+                "cajas_abiertas": cajas,
+            }, status=409)
 
         try:
             wb = Workbook()

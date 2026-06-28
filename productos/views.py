@@ -10,7 +10,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
+from configuracion.models import ConfigTienda
+from core.permissions import EsAdmin, EsAdminOSupervisor, EsAdminSupervisorOCajero, es_superadmin, get_empresa, scope_qs
 from empresas.models import Empresa
 from tiendas.models import Tienda
 from ventas.models import DetalleVenta
@@ -24,6 +25,17 @@ from .serializers import (
     MovimientoInventarioSerializer, ImportarProductoItemSerializer,
 )
 
+
+
+def _mayoreo_habilitado(empresa) -> bool:
+    """True si empresa o alguna de sus tiendas tiene mayoreo activo."""
+    if not empresa:
+        return False
+    if empresa.maneja_mayoreo:
+        return True
+    return ConfigTienda.objects.filter(
+        tienda__empresa=empresa, habilitar_mayoreo=True
+    ).exists()
 
 
 def _resolver_categoria(raw_nombre: str, empresa):
@@ -136,7 +148,7 @@ class ProductoListCreateView(generics.ListCreateAPIView):
             self.request.data.get('categoria_nombre', ''), empresa)
 
         extra = {}
-        if empresa.maneja_mayoreo:
+        if _mayoreo_habilitado(empresa):
             precio_mayoreo = self.request.data.get('precio_mayoreo')
             if precio_mayoreo is not None:
                 extra['precio_mayoreo'] = Decimal(str(precio_mayoreo))
@@ -186,7 +198,7 @@ class ProductoDetailView(generics.RetrieveUpdateDestroyAPIView):
         if raw_cat:
             extra['categoria'] = _resolver_categoria(raw_cat, empresa)
 
-        if empresa and empresa.maneja_mayoreo:
+        if _mayoreo_habilitado(empresa):
             precio_mayoreo = request.data.get('precio_mayoreo')
             if precio_mayoreo is not None:
                 extra['precio_mayoreo'] = Decimal(str(precio_mayoreo))
@@ -316,13 +328,15 @@ class InventarioListView(generics.ListAPIView):
             "producto", "producto__categoria", "tienda")
         qs = scope_qs(self.request, qs)
 
-        tienda_id = self.request.query_params.get("tienda_id")
-        alerta    = self.request.query_params.get("alerta")
-        activo    = self.request.query_params.get("activo", "true")
+        tienda_id  = self.request.query_params.get("tienda_id")
+        alerta     = self.request.query_params.get("alerta")
+        activo     = self.request.query_params.get("activo", "true")
+        categoria  = self.request.query_params.get("categoria")
 
         if activo == "true":    qs = qs.filter(producto__activo=True)
         elif activo == "false": qs = qs.filter(producto__activo=False)
-        if tienda_id: qs = qs.filter(tienda_id=tienda_id)
+        if tienda_id:  qs = qs.filter(tienda_id=tienda_id)
+        if categoria:  qs = qs.filter(producto__categoria_id=categoria)
         if alerta == "bajo":
             qs = qs.filter(
                 stock_actual__lte=F("stock_minimo"),
@@ -723,7 +737,7 @@ class DashboardInventarioView(APIView):
 # ── Feed global de movimientos recientes ─────────────────
 class MovimientosRecientesView(generics.ListAPIView):
     serializer_class   = MovimientoInventarioSerializer
-    permission_classes = [EsAdminOSupervisor]
+    permission_classes = [EsAdminSupervisorOCajero]
 
     def get_queryset(self):
         qs = MovimientoInventario.objects.select_related(
@@ -735,8 +749,13 @@ class MovimientosRecientesView(generics.ListAPIView):
         tipo      = self.request.query_params.get("tipo")
         limite    = int(self.request.query_params.get("limite", 20))
 
-        if tienda_id: qs = qs.filter(tienda_id=tienda_id)
-        if tipo:      qs = qs.filter(tipo=tipo)
+        # Cajero solo ve los movimientos de su propia tienda
+        if self.request.user.rol == "cajero":
+            qs = qs.filter(tienda_id=self.request.user.tienda_id)
+        elif tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+
+        if tipo: qs = qs.filter(tipo=tipo)
 
         return qs.order_by("-created_at")[:limite]
 
@@ -1046,6 +1065,200 @@ class ExportarInventarioView(APIView):
             c.border = border()
 
         ws.freeze_panes = "A4"
+
+        # ── Hoja 2: Averías ───────────────────────────────────
+        ws2 = wb.create_sheet(title="Averías")
+
+        COL_AV = [
+            ("#",                    5,  "center"),
+            ("Código de Barras",    18,  "left"),
+            ("Nombre del Producto", 35,  "left"),
+            ("Categoría",           18,  "left"),
+            ("Tienda",              20,  "left"),
+            ("Unidades Dañadas",    16,  "right"),
+            ("Precio Compra",       14,  "right"),
+            ("Valor Pérdida",       16,  "right"),
+        ]
+        N2        = len(COL_AV)
+        ultima2   = get_column_letter(N2)
+        C_ROJO    = "B03A2E"
+        C_ROJO_L  = "FADBD8"
+        C_ROJO_M  = "E74C3C"
+
+        ws2.row_dimensions[1].height = 32
+        ws2.merge_cells(f"A1:{ultima2}1")
+        c = ws2["A1"]
+        c.value     = f"REPORTE DE AVERÍAS  —  {empresa_nombre.upper()}"
+        c.font      = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
+        c.fill      = PatternFill("solid", fgColor=C_ROJO)
+        c.alignment = ac
+
+        ws2.row_dimensions[2].height = 20
+        ws2.merge_cells(f"A2:{ultima2}2")
+        c = ws2["A2"]
+        c.value     = (
+            f"Generado: {now.strftime('%d/%m/%Y %H:%M')}  |  "
+            f"{tienda_label}  |  Solo productos con stock dañado"
+        )
+        c.font      = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+        c.fill      = PatternFill("solid", fgColor=C_ROJO_M)
+        c.alignment = ac
+
+        ws2.row_dimensions[3].height = 22
+        for i, (nombre_col, ancho, _) in enumerate(COL_AV, start=1):
+            col_letra = get_column_letter(i)
+            ws2.column_dimensions[col_letra].width = ancho
+            c = ws2.cell(row=3, column=i, value=nombre_col)
+            c.font      = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+            c.fill      = PatternFill("solid", fgColor=C_ROJO)
+            c.alignment = ac
+            c.border    = border()
+
+        averias = [inv for inv in inventarios if float(inv.stock_averias) > 0]
+        total_perdida = 0.0
+
+        for num, inv in enumerate(averias, start=1):
+            fila2 = num + 3
+            ws2.row_dimensions[fila2].height = 16
+            unidades  = float(inv.stock_averias)
+            p_compra  = float(inv.producto.precio_compra)
+            perdida   = unidades * p_compra
+            total_perdida += perdida
+            categoria = inv.producto.categoria.nombre \
+                        if inv.producto.categoria else "Sin categoría"
+            fondo = PatternFill("solid", fgColor=C_ROJO_L) if num % 2 == 0 else None
+
+            celdas2 = [
+                (num,                              "center", f_normal,  None),
+                (inv.producto.codigo_barras or "", "left",   f_normal,  None),
+                (inv.producto.nombre,              "left",   f_bold,    None),
+                (categoria,                        "left",   f_normal,  None),
+                (inv.tienda.nombre,                "left",   f_normal,  None),
+                (unidades,                         "right",  f_rojo,    "#,##0.00"),
+                (p_compra,                         "right",  f_normal,  "#,##0.00"),
+                (perdida,                          "right",  f_rojo,    "#,##0.00"),
+            ]
+            for col_idx, (val_c, alin, fuente, fmt) in enumerate(celdas2, start=1):
+                c = ws2.cell(row=fila2, column=col_idx, value=val_c)
+                c.font      = fuente
+                c.border    = border()
+                c.alignment = (
+                    ac if alin == "center" else
+                    ar if alin == "right"  else al
+                )
+                if fondo:
+                    c.fill = fondo
+                if fmt:
+                    c.number_format = fmt
+
+        if not averias:
+            fila_vacia = 4
+            ws2.merge_cells(f"A{fila_vacia}:{ultima2}{fila_vacia}")
+            c = ws2.cell(row=fila_vacia, column=1, value="No hay productos con averías registradas.")
+            c.font      = Font(name="Calibri", size=11, color="1E8449")
+            c.alignment = ac
+        else:
+            fila_tot2 = len(averias) + 4
+            ws2.row_dimensions[fila_tot2].height = 20
+            ws2.merge_cells(f"A{fila_tot2}:G{fila_tot2}")
+            c = ws2.cell(row=fila_tot2, column=1, value="VALOR TOTAL DE PÉRDIDAS POR AVERÍAS")
+            c.font      = Font(name="Calibri", bold=True, size=10)
+            c.fill      = PatternFill("solid", fgColor=C_TOTAL)
+            c.alignment = ar
+            c.border    = border()
+            c = ws2.cell(row=fila_tot2, column=8, value=total_perdida)
+            c.font          = Font(name="Calibri", bold=True, size=10, color=C_ROJO)
+            c.fill          = PatternFill("solid", fgColor=C_TOTAL)
+            c.alignment     = ar
+            c.number_format = "#,##0.00"
+            c.border        = border()
+
+        ws2.freeze_panes = "A4"
+
+        # ── Hoja 3: Historial de movimientos de daño ─────────
+        mov_qs = MovimientoInventario.objects.filter(tipo="dano").select_related(
+            "producto", "tienda", "empleado"
+        )
+        if not es_superadmin(request):
+            mov_qs = mov_qs.filter(tienda__empresa=get_empresa(request))
+        if tienda_id:
+            mov_qs = mov_qs.filter(tienda_id=tienda_id)
+        movimientos = list(mov_qs.order_by("-created_at")[:500])
+
+        if movimientos:
+            ws3 = wb.create_sheet(title="Historial Daños")
+
+            COL_MOV = [
+                ("#",              5,  "center"),
+                ("Fecha",         18,  "center"),
+                ("Producto",      32,  "left"),
+                ("Tienda",        20,  "left"),
+                ("Empleado",      22,  "left"),
+                ("Unidades",      12,  "right"),
+                ("Observación",   40,  "left"),
+            ]
+            N3      = len(COL_MOV)
+            ultima3 = get_column_letter(N3)
+
+            ws3.row_dimensions[1].height = 32
+            ws3.merge_cells(f"A1:{ultima3}1")
+            c = ws3["A1"]
+            c.value     = f"HISTORIAL DE DAÑOS  —  {empresa_nombre.upper()}"
+            c.font      = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
+            c.fill      = PatternFill("solid", fgColor=C_ROJO)
+            c.alignment = ac
+
+            ws3.row_dimensions[2].height = 20
+            ws3.merge_cells(f"A2:{ultima3}2")
+            c = ws3["A2"]
+            c.value     = (
+                f"Generado: {now.strftime('%d/%m/%Y %H:%M')}  |  "
+                f"{tienda_label}  |  Últimos {len(movimientos)} registros"
+            )
+            c.font      = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+            c.fill      = PatternFill("solid", fgColor=C_ROJO_M)
+            c.alignment = ac
+
+            ws3.row_dimensions[3].height = 22
+            for i, (nombre_col, ancho, _) in enumerate(COL_MOV, start=1):
+                ws3.column_dimensions[get_column_letter(i)].width = ancho
+                c = ws3.cell(row=3, column=i, value=nombre_col)
+                c.font      = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+                c.fill      = PatternFill("solid", fgColor=C_ROJO)
+                c.alignment = ac
+                c.border    = border()
+
+            for num, mov in enumerate(movimientos, start=1):
+                fila3 = num + 3
+                ws3.row_dimensions[fila3].height = 16
+                empleado_nombre = (
+                    f"{mov.empleado.nombre} {mov.empleado.apellido}"
+                    if mov.empleado else "—"
+                )
+                fondo3 = PatternFill("solid", fgColor=C_ROJO_L) if num % 2 == 0 else None
+                celdas3 = [
+                    (num,                                "center", f_normal, None),
+                    (mov.created_at.strftime("%d/%m/%Y %H:%M"), "center", f_normal, None),
+                    (mov.producto.nombre,                "left",   f_bold,  None),
+                    (mov.tienda.nombre,                  "left",   f_normal, None),
+                    (empleado_nombre,                    "left",   f_normal, None),
+                    (float(mov.cantidad),                "right",  f_rojo,   "#,##0.00"),
+                    (mov.observacion or "—",             "left",   f_normal, None),
+                ]
+                for col_idx, (val_c, alin, fuente, fmt) in enumerate(celdas3, start=1):
+                    c = ws3.cell(row=fila3, column=col_idx, value=val_c)
+                    c.font      = fuente
+                    c.border    = border()
+                    c.alignment = (
+                        ac if alin == "center" else
+                        ar if alin == "right"  else al
+                    )
+                    if fondo3:
+                        c.fill = fondo3
+                    if fmt:
+                        c.number_format = fmt
+
+            ws3.freeze_panes = "A4"
 
         fecha_str = now.strftime("%Y%m%d_%H%M")
         response  = HttpResponse(

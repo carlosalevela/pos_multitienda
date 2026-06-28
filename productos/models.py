@@ -45,7 +45,15 @@ class Producto(models.Model):
         help_text=(
             "Precio al por mayor. Solo aplica si la empresa "
             "tiene activado 'maneja_mayoreo'. Se usa cuando "
-            "la cantidad vendida es >= empresa.cantidad_mayoreo."
+            "la cantidad vendida es >= cantidad_minima_mayoreo "
+            "(o empresa.cantidad_mayoreo si no se define aquí)."
+        )
+    )
+    cantidad_minima_mayoreo = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text=(
+            "Cantidad mínima para aplicar precio mayoreo en este producto. "
+            "Si es null, usa el valor global de empresa.cantidad_mayoreo."
         )
     )
 
@@ -60,19 +68,29 @@ class Producto(models.Model):
     def __str__(self):
         return self.nombre
 
-    def get_precio(self, cantidad: float = 1) -> float:
+    def get_precio(self, cantidad: float = 1, tienda=None) -> float:
         """
-        Retorna el precio correcto según la cantidad.
-        - Si la empresa maneja mayoreo Y la cantidad >= cantidad_mayoreo
-          Y el producto tiene precio_mayoreo → retorna precio_mayoreo.
-        - En cualquier otro caso → retorna precio_venta.
+        Retorna el precio correcto según la cantidad y la tienda.
+        Orden de prioridad para el umbral mayoreo:
+          1. producto.cantidad_minima_mayoreo  (per-producto)
+          2. empresa.cantidad_mayoreo          (global de empresa)
+        La tienda puede desactivar mayoreo vía ConfigTienda.habilitar_mayoreo.
         """
-        if (
-            self.empresa
-            and self.empresa.maneja_mayoreo
-            and self.precio_mayoreo is not None
-            and cantidad >= self.empresa.cantidad_mayoreo
-        ):
+        if not (self.empresa and self.empresa.maneja_mayoreo):
+            return float(self.precio_venta)
+        if self.precio_mayoreo is None:
+            return float(self.precio_venta)
+
+        # Verificar toggle de tienda si se proporciona
+        if tienda is not None:
+            try:
+                if not tienda.config.habilitar_mayoreo:
+                    return float(self.precio_venta)
+            except Exception:
+                pass
+
+        umbral = self.cantidad_minima_mayoreo or self.empresa.cantidad_mayoreo
+        if cantidad >= umbral:
             return float(self.precio_mayoreo)
         return float(self.precio_venta)
 

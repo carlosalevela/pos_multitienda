@@ -362,6 +362,42 @@ class SesionGastosView(APIView):
         })
 
 
+# ── Verificar si se puede generar reporte ─────────────────────
+class VerificarReporteView(APIView):
+    """
+    GET /api/caja/verificar-reporte/?tienda_id={id}
+    Devuelve si el usuario puede generar reportes (no hay cajas abiertas hoy).
+    El frontend usa esto para habilitar / deshabilitar el botón de exportar.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tienda_id = request.query_params.get("tienda_id")
+
+        qs = SesionCaja.objects.filter(estado="abierta").select_related("tienda", "empleado")
+        if not es_superadmin(request):
+            qs = qs.filter(tienda__empresa=get_empresa(request))
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+        elif request.user.rol == "cajero":
+            qs = qs.filter(tienda_id=request.user.tienda_id)
+
+        cajas = [
+            {
+                "sesion_id": s.id,
+                "tienda":    s.tienda.nombre,
+                "empleado":  f"{s.empleado.nombre} {s.empleado.apellido}" if s.empleado else "—",
+                "desde":     s.fecha_apertura.strftime("%H:%M"),
+            }
+            for s in qs
+        ]
+
+        return Response({
+            "puede_reportar": len(cajas) == 0,
+            "cajas_abiertas": cajas,
+        })
+
+
 # ── Dashboard de Caja (Admin / Superadmin) ────────────────────
 class DashboardCajaView(APIView):
     permission_classes = [EsAdminOSupervisor]

@@ -24,9 +24,35 @@ class _ProductoInventarioMixin:
         return cache[obj.pk]
 
     def get_maneja_mayoreo(self, obj):
-        return obj.empresa.maneja_mayoreo if obj.empresa else False
+        if obj.empresa and obj.empresa.maneja_mayoreo:
+            return True
+        cfg = self._get_config_tienda()
+        return bool(cfg and cfg.habilitar_mayoreo)
 
     def get_cantidad_mayoreo(self, obj):
+        return obj.empresa.cantidad_mayoreo if obj.empresa else None
+
+    def _get_config_tienda(self):
+        """Carga y cachea ConfigTienda de la tienda activa en el request."""
+        cache = self.context.setdefault("_cfg_tienda_cache", {})
+        if "result" not in cache:
+            request   = self.context.get("request")
+            tienda_id = request.query_params.get("tienda_id") if request else None
+            if tienda_id:
+                try:
+                    from configuracion.models import ConfigTienda
+                    cache["result"] = ConfigTienda.objects.get(tienda_id=tienda_id)
+                except Exception:
+                    cache["result"] = None
+            else:
+                cache["result"] = None
+        return cache["result"]
+
+    def get_umbral_mayoreo(self, obj):
+        """Umbral efectivo: tienda (si tiene) → empresa (global)."""
+        cfg = self._get_config_tienda()
+        if cfg and cfg.umbral_mayoreo is not None:
+            return cfg.umbral_mayoreo
         return obj.empresa.cantidad_mayoreo if obj.empresa else None
 
 
@@ -36,6 +62,7 @@ class ProductoSerializer(_ProductoInventarioMixin, serializers.ModelSerializer):
     stock_minimo     = serializers.SerializerMethodField()
     maneja_mayoreo   = serializers.SerializerMethodField()
     cantidad_mayoreo = serializers.SerializerMethodField()
+    umbral_mayoreo   = serializers.SerializerMethodField()
 
     class Meta:
         model  = Producto
@@ -44,10 +71,11 @@ class ProductoSerializer(_ProductoInventarioMixin, serializers.ModelSerializer):
             "imagen",
             "categoria", "categoria_nombre",
             "precio_compra", "precio_venta", "precio_mayoreo",
+            "cantidad_minima_mayoreo",
             "unidad_medida", "aplica_impuesto", "porcentaje_impuesto",
             "activo", "created_at",
             "stock_actual", "stock_minimo",
-            "maneja_mayoreo", "cantidad_mayoreo",
+            "maneja_mayoreo", "cantidad_mayoreo", "umbral_mayoreo",
         ]
         read_only_fields = ["id", "created_at", "empresa"]
 
@@ -72,19 +100,19 @@ class ProductoSerializer(_ProductoInventarioMixin, serializers.ModelSerializer):
 class ProductoSimpleSerializer(_ProductoInventarioMixin, serializers.ModelSerializer):
     """Para búsquedas rápidas en el POS."""
 
-    stock_actual     = serializers.SerializerMethodField()
-    precio_mayoreo   = serializers.DecimalField(
+    stock_actual   = serializers.SerializerMethodField()
+    precio_mayoreo = serializers.DecimalField(
         max_digits=12, decimal_places=2, read_only=True, allow_null=True)
-    maneja_mayoreo   = serializers.SerializerMethodField()
-    cantidad_mayoreo = serializers.SerializerMethodField()
-    alerta_stock     = serializers.SerializerMethodField()
+    maneja_mayoreo = serializers.SerializerMethodField()
+    umbral_mayoreo = serializers.SerializerMethodField()
+    alerta_stock   = serializers.SerializerMethodField()
 
     class Meta:
         model  = Producto
         fields = [
             "id", "nombre", "codigo_barras",
             "precio_venta", "precio_mayoreo",
-            "maneja_mayoreo", "cantidad_mayoreo",
+            "maneja_mayoreo", "umbral_mayoreo",
             "aplica_impuesto", "porcentaje_impuesto",
             "unidad_medida", "stock_actual", "alerta_stock",
         ]
@@ -171,8 +199,10 @@ class ImportarProductoItemSerializer(serializers.Serializer):
     categoria_nombre = serializers.CharField(required=False, allow_blank=True, default='')
     precio_venta     = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
     precio_compra    = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
-    precio_mayoreo   = serializers.DecimalField(
+    precio_mayoreo          = serializers.DecimalField(
         max_digits=12, decimal_places=2, required=False, allow_null=True, default=None)
+    cantidad_minima_mayoreo = serializers.IntegerField(
+        required=False, allow_null=True, default=None, min_value=1)
     stock_actual     = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
     stock_minimo     = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
     stock_maximo     = serializers.DecimalField(

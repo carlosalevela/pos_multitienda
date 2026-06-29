@@ -38,13 +38,17 @@ def es_superadmin(request):
 
 
 def get_empresa(request):
-    """Retorna la empresa del usuario. Para superadmin retorna None."""
+    """Retorna la empresa del usuario. Para superadmin retorna None.
+    Fallback: si empresa_id es None pero el usuario tiene tienda, infiere la empresa desde ahí.
+    """
     user = request.user
     if user.rol == "superadmin":
         return None
-    if not hasattr(user, "empresa") or user.empresa_id is None:
-        raise PermissionDenied("El usuario no tiene una empresa asignada.")
-    return user.empresa
+    if user.empresa_id is not None:
+        return user.empresa
+    if user.tienda_id is not None and user.tienda and user.tienda.empresa_id is not None:
+        return user.tienda.empresa
+    raise PermissionDenied("El usuario no tiene una empresa asignada.")
 
 
 def scope_qs(request, *querysets, campo_empresa="tienda__empresa", tienda_id=None):

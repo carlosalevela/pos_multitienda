@@ -1,5 +1,6 @@
 from decimal import Decimal
 from rest_framework import serializers
+from core.permissions import es_superadmin, get_empresa
 from .models import Devolucion, DetalleDevolucion
 
 
@@ -26,8 +27,9 @@ class DetalleDevolucionSerializer(serializers.ModelSerializer):
 
     def validate_producto(self, producto):
         request = self.context.get("request")
-        if request and producto.empresa != request.user.empresa:
-            raise serializers.ValidationError("El producto no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if producto.empresa != get_empresa(request):
+                raise serializers.ValidationError("El producto no pertenece a tu empresa.")
         return producto
 
     def validate(self, attrs):
@@ -92,16 +94,18 @@ class DevolucionSerializer(serializers.ModelSerializer):
 
     def validate_venta(self, venta):
         request = self.context.get("request")
-        if request and venta.tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError("La venta no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if venta.tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError("La venta no pertenece a tu empresa.")
         if venta.estado == "anulada":
             raise serializers.ValidationError("No se puede devolver una venta anulada.")
         return venta
 
     def validate_producto_reemplazo(self, producto):
         request = self.context.get("request")
-        if producto and request and producto.empresa != request.user.empresa:
-            raise serializers.ValidationError("El producto de reemplazo no pertenece a tu empresa.")
+        if producto and request and not es_superadmin(request):
+            if producto.empresa != get_empresa(request):
+                raise serializers.ValidationError("El producto de reemplazo no pertenece a tu empresa.")
         return producto
 
     def validate_detalles(self, value):

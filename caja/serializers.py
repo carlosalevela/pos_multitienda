@@ -4,6 +4,7 @@ from django.db.models import DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from rest_framework import serializers
 
+from core.permissions import es_superadmin, get_empresa
 from .models import SesionCaja
 
 
@@ -102,8 +103,9 @@ class SesionCajaSerializer(serializers.ModelSerializer):
 
     def validate_tienda(self, tienda):
         request = self.context.get("request")
-        if request and tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError("La tienda no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError("La tienda no pertenece a tu empresa.")
         return tienda
 
     def get_empleado_nombre(self, obj):

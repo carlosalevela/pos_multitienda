@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, F, Sum
+from django.db.models import Count, DecimalField, F, Q, Sum
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth
 from django.http import HttpResponse
 from django.utils import timezone
@@ -1001,6 +1001,83 @@ class FlujoCajaView(APIView):
             "sesiones":                   sesiones,
             "advertencia_cajas_abiertas": _cajas_abiertas(request, tienda_id, fecha_fin),
         })
+
+
+# ── Top Clientes ─────────────────────────────────────────────
+class TopClientesView(APIView):
+    """
+    Ranking de los mejores clientes por monto comprado.
+    Parámetros: tienda_id (opcional), fecha (para vista diaria),
+                fecha_ini + fecha_fin (para vista por rango), limite (default 5).
+    """
+    permission_classes = [EsAdminSupervisorOCajero]
+
+    def get(self, request):
+        from clientes.models import TierConfig
+
+        tienda_id = request.query_params.get('tienda_id')
+        fecha_ini = request.query_params.get('fecha_ini')
+        fecha_fin = request.query_params.get('fecha_fin')
+        fecha     = request.query_params.get('fecha')
+        limite    = int(request.query_params.get('limite', 5))
+
+        if request.user.rol == 'cajero':
+            tienda_id = str(request.user.tienda_id)
+
+        qs = Venta.objects.filter(estado='completada', cliente__isnull=False)
+        qs = scope_qs(request, qs, tienda_id=tienda_id)
+
+        if fecha_ini and fecha_fin:
+            qs = qs.filter(created_at__date__gte=fecha_ini, created_at__date__lte=fecha_fin)
+        elif fecha:
+            qs = qs.filter(created_at__date=fecha)
+
+        top = list(
+            qs.values(
+                'cliente_id',
+                'cliente__nombre',
+                'cliente__apellido',
+                'cliente__total_acumulado',
+            )
+            .annotate(
+                total_periodo=Sum('total'),
+                num_compras=Count('id'),
+            )
+            .order_by('-total_periodo')[:limite]
+        )
+
+        empresa = None if es_superadmin(request) else get_empresa(request)
+        tiers = (
+            list(TierConfig.objects.filter(empresa=empresa, activo=True).order_by('-umbral_min'))
+            if empresa else []
+        )
+
+        def _tier(acum):
+            for t in tiers:
+                if acum >= t.umbral_min and (t.umbral_max is None or acum < t.umbral_max):
+                    return {
+                        'id': t.id, 'nombre': t.nombre,
+                        'color_hex': t.color_hex, 'descuento_pct': float(t.descuento_pct),
+                    }
+            return None
+
+        result = []
+        for c in top:
+            acum = float(c['cliente__total_acumulado'] or 0)
+            nombre = (
+                f"{c['cliente__nombre'] or ''} {c['cliente__apellido'] or ''}".strip()
+                or 'Sin nombre'
+            )
+            result.append({
+                'cliente_id':      c['cliente_id'],
+                'nombre':          nombre,
+                'total_periodo':   float(c['total_periodo'] or 0),
+                'num_compras':     c['num_compras'],
+                'total_acumulado': acum,
+                'tier':            _tier(acum),
+            })
+
+        return Response(result)
 
 
 # ── Exportación a Excel ───────────────────────────────────────

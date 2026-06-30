@@ -13,8 +13,8 @@ from rest_framework.views import APIView
 from caja.models import SesionCaja, MovimientoCaja
 from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
 from productos.models import Inventario, MovimientoInventario
-from .models import Cliente, Separado, AbonoSeparado
-from .serializers import ClienteSerializer, ClienteSimpleSerializer, SeparadoSerializer
+from .models import Cliente, Separado, AbonoSeparado, TierConfig
+from .serializers import ClienteSerializer, ClienteSimpleSerializer, SeparadoSerializer, TierConfigSerializer
 
 
 # ── Helper empleado ───────────────────────────────────────
@@ -512,3 +512,24 @@ class AbonosPorFechaView(APIView):
             "abonos": data,
             "total":  sum(d["monto"] for d in data),
         })
+
+
+# ── Tiers de fidelización ─────────────────────────────────
+class TierConfigListCreateView(generics.ListCreateAPIView):
+    serializer_class   = TierConfigSerializer
+    permission_classes = [EsAdminOSupervisor]
+
+    def get_queryset(self):
+        empresa = get_empresa(self.request)
+        return TierConfig.objects.filter(empresa=empresa)
+
+    def perform_create(self, serializer):
+        serializer.save(empresa=get_empresa(self.request))
+
+
+class TierConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class   = TierConfigSerializer
+    permission_classes = [EsAdminOSupervisor]
+
+    def get_queryset(self):
+        return TierConfig.objects.filter(empresa=get_empresa(self.request))

@@ -5,9 +5,14 @@ from .views import (
     SeparadoListCreateView, SeparadoDetailView,
     AbonarSeparadoView, CancelarSeparadoView,
     AlertasSeparadosView, AbonosPorFechaView,
+    TierConfigListCreateView, TierConfigDetailView,
 )
 
 urlpatterns = [
+    # ── Tiers de fidelización ─────────────────────────────────
+    path("tiers/",            TierConfigListCreateView.as_view(), name="tier_configs"),
+    path("tiers/<int:pk>/",   TierConfigDetailView.as_view(),     name="tier_config_detail"),
+
     # ── Clientes ──────────────────────────────────────────────
     path("",                    ClienteListCreateView.as_view(), name="clientes"),
     path("simple/",             ClienteSimpleListView.as_view(), name="clientes_simple"),

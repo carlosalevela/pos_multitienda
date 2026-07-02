@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import timedelta
 from decimal import Decimal
 
@@ -49,22 +50,32 @@ class CrearVentaView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
+        # Agregar cantidades por producto (por si el mismo producto viene
+        # en varias líneas) antes de validar stock, evitando falsos positivos.
+        qty_por_producto = defaultdict(Decimal)
         for item in request.data.get("detalles", []):
+            qty_por_producto[int(item["producto"])] += Decimal(str(item["cantidad"]))
+
+        for producto_id, cantidad_total in qty_por_producto.items():
             try:
-                inv = Inventario.objects.select_for_update().get(
-                    producto_id=item["producto"],
+                inv = Inventario.objects.select_for_update().select_related(
+                    "producto"
+                ).get(
+                    producto_id=producto_id,
                     tienda_id=tienda_id,
                     tienda__empresa=empresa,
                 )
             except Inventario.DoesNotExist:
                 return Response(
-                    {"error": f"Producto ID {item['producto']} sin inventario en esta tienda."},
+                    {"error": f"Producto sin inventario en esta tienda (ID {producto_id})."},
                     status=400)
 
-            if Decimal(str(inv.stock_actual)) < Decimal(str(item["cantidad"])):
+            if inv.stock_actual < cantidad_total:
                 return Response({
-                    "error": f"Stock insuficiente para producto ID {item['producto']}. "
-                             f"Disponible: {inv.stock_actual}, solicitado: {item['cantidad']}."
+                    "error": (
+                        f"Stock insuficiente para '{inv.producto.nombre}'. "
+                        f"Disponible: {inv.stock_actual}, solicitado: {cantidad_total}."
+                    )
                 }, status=400)
 
         venta = serializer.save(empleado=request.user)

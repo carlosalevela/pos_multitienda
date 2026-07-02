@@ -127,17 +127,19 @@ class AbonoSeparadoSerializer(serializers.ModelSerializer):
 
 # ─── Separado ────────────────────────────────────────────────────────────────
 class SeparadoSerializer(serializers.ModelSerializer):
-    detalles        = DetalleSeparadoSerializer(many=True)
-    abonos          = AbonoSeparadoSerializer(many=True, read_only=True)
-    cliente_nombre  = serializers.SerializerMethodField()
-    tienda_nombre   = serializers.CharField(source='tienda.nombre', read_only=True)
-    empleado_nombre = serializers.SerializerMethodField()
+    detalles           = DetalleSeparadoSerializer(many=True)
+    abonos             = AbonoSeparadoSerializer(many=True, read_only=True)
+    cliente_nombre     = serializers.SerializerMethodField()
+    cliente_cedula_nit = serializers.SerializerMethodField()
+    cliente_telefono   = serializers.SerializerMethodField()
+    tienda_nombre      = serializers.CharField(source='tienda.nombre', read_only=True)
+    empleado_nombre    = serializers.SerializerMethodField()
 
     class Meta:
         model  = Separado
         fields = [
             'id', 'tienda', 'tienda_nombre',
-            'cliente', 'cliente_nombre',
+            'cliente', 'cliente_nombre', 'cliente_cedula_nit', 'cliente_telefono',
             'empleado', 'empleado_nombre',
             'total', 'abono_acumulado', 'saldo_pendiente',
             'fecha_limite', 'estado',
@@ -150,6 +152,12 @@ class SeparadoSerializer(serializers.ModelSerializer):
 
     def get_cliente_nombre(self, obj):
         return f'{obj.cliente.nombre} {obj.cliente.apellido}'
+
+    def get_cliente_cedula_nit(self, obj):
+        return obj.cliente.cedula_nit or ''
+
+    def get_cliente_telefono(self, obj):
+        return obj.cliente.telefono or ''
 
     def get_empleado_nombre(self, obj):
         if obj.empleado:

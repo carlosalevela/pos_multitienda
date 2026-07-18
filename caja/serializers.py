@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models import Count, DecimalField, Q, Sum, Value
 from django.db.models.functions import Coalesce
 from rest_framework import serializers
 
@@ -23,6 +23,9 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     gastos_total = serializers.DecimalField(
         source="gastos_total_ann", max_digits=12, decimal_places=2, read_only=True
     )
+    num_transacciones = serializers.IntegerField(
+        source="num_transacciones_ann", read_only=True
+    )
 
     class Meta:
         model  = SesionCaja
@@ -33,7 +36,7 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             "saldo_inicial",
             "monto_final_sistema", "monto_final_real",
             "diferencia", "observaciones", "estado",
-            "ventas_total", "gastos_total",
+            "ventas_total", "gastos_total", "num_transacciones",
         ]
 
     def get_empleado_nombre(self, obj):
@@ -51,6 +54,11 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
                 _zero,
             ),
             "gastos_total_ann": Coalesce(Sum("gasto__monto"), _zero),
+            "num_transacciones_ann": Count(
+                "ventas",
+                filter=Q(ventas__estado="completada"),
+                distinct=True,
+            ),
         }
 
 

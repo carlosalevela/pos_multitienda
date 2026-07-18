@@ -142,10 +142,13 @@ class VentaListView(generics.ListAPIView):
         fecha     = self.request.query_params.get("fecha")
         cliente   = self.request.query_params.get("cliente_id")
 
-        if tienda_id: qs = qs.filter(tienda_id=tienda_id)
-        if sesion_id: qs = qs.filter(sesion_caja_id=sesion_id)
-        if fecha:     qs = qs.filter(created_at__date=fecha)
-        if cliente:   qs = qs.filter(cliente_id=cliente)
+        numero_orden = self.request.query_params.get("numero_orden")
+
+        if tienda_id:    qs = qs.filter(tienda_id=tienda_id)
+        if sesion_id:    qs = qs.filter(sesion_caja_id=sesion_id)
+        if fecha:        qs = qs.filter(created_at__date=fecha)
+        if cliente:      qs = qs.filter(cliente_id=cliente)
+        if numero_orden: qs = qs.filter(numero_orden__icontains=numero_orden)
 
         return qs.order_by("-created_at")
 

@@ -7,6 +7,7 @@ from .views import (
     TopProductosView, ReactivarProductoView, ImportarProductosView,
     DashboardInventarioView, MovimientosRecientesView,
     ExportarInventarioView, AveriasView, RecuperarAveriaView,
+    TransferenciaInventarioView,
 )
 
 urlpatterns = [
@@ -49,4 +50,7 @@ urlpatterns = [
     # Analytics / Dashboard
     path("top-productos/",  TopProductosView.as_view(),        name="top-productos"),
     path("dashboard/",      DashboardInventarioView.as_view(), name="dashboard_inventario"),
+
+    # Transferencias entre tiendas
+    path("transferencias/", TransferenciaInventarioView.as_view(), name="transferencias_inventario"),
 ]

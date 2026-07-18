@@ -67,3 +67,4 @@ vine==5.1.0
 wcwidth==0.2.13
 whitenoise==6.11.0
 xgboost==3.0.0
+pdfplumber==0.11.10

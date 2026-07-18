@@ -1272,3 +1272,97 @@ class ExportarInventarioView(APIView):
         )
         wb.save(response)
         return response
+
+
+# ── Transferencias entre tiendas ──────────────────────────────
+class TransferenciaInventarioView(APIView):
+    """
+    POST /api/productos/transferencias/
+    Mueve stock de una tienda a otra para el mismo producto.
+    Body: { producto_id, tienda_origen_id, tienda_destino_id, cantidad, observacion }
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    @transaction.atomic
+    def post(self, request):
+        producto_id      = request.data.get("producto_id")
+        tienda_origen_id = request.data.get("tienda_origen_id")
+        tienda_destino_id = request.data.get("tienda_destino_id")
+        cantidad_raw     = request.data.get("cantidad")
+        observacion      = request.data.get("observacion", "")
+
+        # Validaciones básicas
+        if not all([producto_id, tienda_origen_id, tienda_destino_id, cantidad_raw]):
+            return Response({"error": "Faltan campos requeridos."}, status=400)
+
+        if str(tienda_origen_id) == str(tienda_destino_id):
+            return Response({"error": "La tienda de origen y destino deben ser diferentes."}, status=400)
+
+        try:
+            cantidad = Decimal(str(cantidad_raw))
+        except Exception:
+            return Response({"error": "Cantidad inválida."}, status=400)
+
+        if cantidad <= 0:
+            return Response({"error": "La cantidad debe ser mayor a cero."}, status=400)
+
+        try:
+            producto = Producto.objects.get(pk=producto_id)
+        except Producto.DoesNotExist:
+            return Response({"error": "Producto no encontrado."}, status=404)
+
+        from tiendas.models import Tienda
+        try:
+            tienda_origen  = Tienda.objects.get(pk=tienda_origen_id)
+            tienda_destino = Tienda.objects.get(pk=tienda_destino_id)
+        except Tienda.DoesNotExist:
+            return Response({"error": "Tienda no encontrada."}, status=404)
+
+        # Stock de origen (with lock for atomicity)
+        inv_origen, _ = Inventario.objects.select_for_update().get_or_create(
+            producto=producto, tienda=tienda_origen,
+            defaults={"stock_actual": 0},
+        )
+        if inv_origen.stock_actual < cantidad:
+            return Response({
+                "error": f"Stock insuficiente en {tienda_origen.nombre}. "
+                         f"Disponible: {inv_origen.stock_actual}."
+            }, status=400)
+
+        inv_destino, _ = Inventario.objects.select_for_update().get_or_create(
+            producto=producto, tienda=tienda_destino,
+            defaults={"stock_actual": 0},
+        )
+
+        # Mover stock
+        inv_origen.stock_actual  -= cantidad
+        inv_destino.stock_actual += cantidad
+        inv_origen.save(update_fields=["stock_actual"])
+        inv_destino.save(update_fields=["stock_actual"])
+
+        empleado = getattr(request.user, "empleado", None)
+        obs = observacion or f"Transferencia a {tienda_destino.nombre}"
+
+        MovimientoInventario.objects.create(
+            producto=producto, tienda=tienda_origen,
+            empleado=empleado, tipo="transferencia",
+            cantidad=-cantidad,
+            referencia_tipo="transferencia",
+            observacion=obs,
+        )
+        MovimientoInventario.objects.create(
+            producto=producto, tienda=tienda_destino,
+            empleado=empleado, tipo="transferencia",
+            cantidad=cantidad,
+            referencia_tipo="transferencia",
+            observacion=f"Recibido desde {tienda_origen.nombre}",
+        )
+
+        return Response({
+            "mensaje":          f"Transferencia de {cantidad} unidad(es) realizada.",
+            "producto":         producto.nombre,
+            "tienda_origen":    tienda_origen.nombre,
+            "tienda_destino":   tienda_destino.nombre,
+            "stock_origen":     float(inv_origen.stock_actual),
+            "stock_destino":    float(inv_destino.stock_actual),
+        }, status=201)

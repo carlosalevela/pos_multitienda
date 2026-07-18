@@ -1272,6 +1272,78 @@ def _build_flujo_caja_sheet(ws, data):
             cell.alignment = Alignment(horizontal="right")
 
 
+# ── Rentabilidad por Producto ─────────────────────────────────
+class RentabilidadProductosView(APIView):
+    """
+    Margen bruto por producto en un período.
+    Usa costo_unitario capturado en DetalleVenta al momento de la venta.
+    Parámetros: fecha_ini, fecha_fin, tienda_id (opcional), limite (default 50).
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from django.db.models import ExpressionWrapper, DecimalField as OrmDecimal, Value
+        from django.db.models.functions import Coalesce
+
+        today     = timezone.now().date()
+        fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
+        fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
+        tienda_id = request.query_params.get("tienda_id")
+        limite    = int(request.query_params.get("limite", 50))
+
+        qs = DetalleVenta.objects.filter(
+            venta__estado="completada",
+            venta__created_at__date__gte=fecha_ini,
+            venta__created_at__date__lte=fecha_fin,
+            producto__isnull=False,
+        )
+        qs = scope_qs(request, qs, campo_empresa="venta__tienda__empresa")
+        if tienda_id:
+            qs = qs.filter(venta__tienda_id=tienda_id)
+
+        costo_expr = ExpressionWrapper(
+            Coalesce(F("costo_unitario"), Value(Decimal("0"))) * F("cantidad"),
+            output_field=OrmDecimal(max_digits=14, decimal_places=2),
+        )
+
+        rows = (
+            qs
+            .values("producto_id", "producto__nombre", "producto__categoria__nombre")
+            .annotate(
+                cantidad_vendida=Sum("cantidad"),
+                ingresos=Sum("subtotal"),
+                costo_total=Sum(costo_expr),
+            )
+            .order_by("-ingresos")[:limite]
+        )
+
+        productos = []
+        for r in rows:
+            ingresos    = float(r["ingresos"]    or 0)
+            costo_total = float(r["costo_total"] or 0)
+            utilidad    = ingresos - costo_total
+            margen      = round(utilidad / ingresos * 100, 2) if ingresos else 0.0
+            productos.append({
+                "producto_id":       r["producto_id"],
+                "nombre":            r["producto__nombre"],
+                "categoria":         r["producto__categoria__nombre"] or "Sin categoría",
+                "cantidad_vendida":  float(r["cantidad_vendida"] or 0),
+                "ingresos":          round(ingresos, 2),
+                "costo_total":       round(costo_total, 2),
+                "utilidad":          round(utilidad, 2),
+                "margen_pct":        margen,
+                "tiene_costo":       costo_total > 0,
+            })
+
+        # ordenar por utilidad descendente
+        productos.sort(key=lambda x: x["utilidad"], reverse=True)
+
+        return Response({
+            "periodo":   {"desde": str(fecha_ini), "hasta": str(fecha_fin), "tienda_id": tienda_id},
+            "productos": productos,
+        })
+
+
 class ExportarContabilidadView(APIView):
     """
     Exporta reportes de contabilidad a Excel.

@@ -163,14 +163,29 @@ class ConsecutivoFactura(models.Model):
     @classmethod
     def siguiente_numero(cls, empresa):
         """
-        Devuelve el siguiente número entero para la empresa,
-        sin saltos por borrados y seguro en concurrencia.
+        Devuelve el siguiente número entero para la empresa.
+        Si no existe el registro, lo inicializa desde el máximo real en ventas
+        para evitar colisiones con facturas creadas antes de existir el contador.
         """
         with transaction.atomic():
-            obj, _ = cls.objects.select_for_update().get_or_create(
-                empresa=empresa,
-                defaults={"ultimo_numero": 0},
-            )
+            if not cls.objects.filter(empresa=empresa).exists():
+                # Primera vez: parte del máximo existente, no de 0
+                ultimo_real = 0
+                for num in Venta.objects.filter(
+                    empresa=empresa, numero_factura__startswith='FAC-'
+                ).values_list('numero_factura', flat=True):
+                    try:
+                        n = int(num[4:])
+                        if n > ultimo_real:
+                            ultimo_real = n
+                    except ValueError:
+                        pass
+                cls.objects.get_or_create(
+                    empresa=empresa,
+                    defaults={"ultimo_numero": ultimo_real},
+                )
+
+            obj = cls.objects.select_for_update().get(empresa=empresa)
             obj.ultimo_numero += 1
             obj.save(update_fields=["ultimo_numero"])
             return obj.ultimo_numero

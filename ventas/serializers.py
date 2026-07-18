@@ -5,6 +5,7 @@ from .models import Venta, DetalleVenta, PagoVenta
 from productos.models import Producto, Inventario, MovimientoInventario
 from caja.models import SesionCaja
 from clientes.models import Cliente
+from core.permissions import es_superadmin, get_empresa
 from devoluciones.models import Devolucion, DetalleDevolucion
 
 
@@ -22,8 +23,9 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
 
     def validate_producto(self, producto):
         request = self.context.get("request")
-        if request and producto.empresa != request.user.empresa:
-            raise serializers.ValidationError("El producto no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if producto.empresa != get_empresa(request):
+                raise serializers.ValidationError("El producto no pertenece a tu empresa.")
         return producto
 
     def validate(self, attrs):
@@ -71,24 +73,27 @@ class VentaSerializer(serializers.ModelSerializer):
 
     def validate_tienda(self, tienda):
         request = self.context.get("request")
-        if request and tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError("La tienda no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError("La tienda no pertenece a tu empresa.")
         return tienda
 
     def validate_cliente(self, cliente):
         if cliente is None:
             return cliente
         request = self.context.get("request")
-        if request and cliente.empresa != request.user.empresa:
-            raise serializers.ValidationError("El cliente no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if cliente.empresa != get_empresa(request):
+                raise serializers.ValidationError("El cliente no pertenece a tu empresa.")
         return cliente
 
     def validate_sesion_caja(self, sesion):
         if sesion is None:
             return sesion
         request = self.context.get("request")
-        if request and sesion.tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError("La sesión de caja no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if sesion.tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError("La sesión de caja no pertenece a tu empresa.")
         return sesion
 
     def validate(self, attrs):
@@ -119,7 +124,7 @@ class VentaSerializer(serializers.ModelSerializer):
         total  = subtotal - descuento_total + impuesto_total
         vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
 
-        empresa = self.context["request"].user.empresa
+        empresa = get_empresa(self.context["request"])
         numero  = Venta.generar_numero_factura(empresa)
 
         venta = Venta.objects.create(
@@ -165,8 +170,9 @@ class DetalleDevueltoSerializer(serializers.Serializer):
 
     def validate_producto(self, producto):
         request = self.context.get("request")
-        if request and producto.empresa != request.user.empresa:
-            raise serializers.ValidationError("El producto no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if producto.empresa != get_empresa(request):
+                raise serializers.ValidationError("El producto no pertenece a tu empresa.")
         return producto
 
 
@@ -186,16 +192,18 @@ class CambioPOSSerializer(serializers.Serializer):
         if sesion.estado != "abierta":
             raise serializers.ValidationError("La sesión de caja no está abierta.")
         request = self.context.get("request")
-        if request and sesion.tienda.empresa != request.user.empresa:
-            raise serializers.ValidationError("La sesión de caja no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if sesion.tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError("La sesión de caja no pertenece a tu empresa.")
         return sesion
 
     def validate_cliente(self, cliente):
         if cliente is None:
             return cliente
         request = self.context.get("request")
-        if request and cliente.empresa != request.user.empresa:
-            raise serializers.ValidationError("El cliente no pertenece a tu empresa.")
+        if request and not es_superadmin(request):
+            if cliente.empresa != get_empresa(request):
+                raise serializers.ValidationError("El cliente no pertenece a tu empresa.")
         return cliente
 
     # ── Validación cruzada ────────────────────────────────────────────────────
@@ -253,7 +261,7 @@ class CambioPOSSerializer(serializers.Serializer):
         with transaction.atomic():
 
             # ── PASO 1: Número de factura ─────────────────────────────────────
-            empresa = request.user.empresa
+            empresa = get_empresa(request)
             numero  = Venta.generar_numero_factura(empresa)
 
             # ── PASO 2: Calcular totales de la nueva venta ────────────────────

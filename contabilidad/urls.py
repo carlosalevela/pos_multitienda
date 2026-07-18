@@ -6,7 +6,7 @@ from .views import (
     ProductosMasVendidosView, EstadoResultadosView,
     ComparativoTiendasView, VentasPorEmpleadoView,
     PuntoEquilibrioView, FlujoCajaView,
-    TopClientesView,
+    TopClientesView, RentabilidadProductosView,
     ExportarContabilidadView,
 )
 
@@ -23,6 +23,7 @@ urlpatterns = [
     path("reportes/ventas-por-empleado/", VentasPorEmpleadoView.as_view(),    name="ventas_por_empleado"),
     path("reportes/punto-equilibrio/",    PuntoEquilibrioView.as_view(),      name="punto_equilibrio"),
     path("reportes/flujo-caja/",          FlujoCajaView.as_view(),            name="flujo_caja"),
-    path("reportes/top-clientes/",         TopClientesView.as_view(),          name="top_clientes"),
-    path("reportes/exportar/",            ExportarContabilidadView.as_view(), name="exportar_contabilidad"),
+    path("reportes/top-clientes/",          TopClientesView.as_view(),           name="top_clientes"),
+    path("reportes/rentabilidad/",          RentabilidadProductosView.as_view(), name="rentabilidad_productos"),
+    path("reportes/exportar/",             ExportarContabilidadView.as_view(),  name="exportar_contabilidad"),
 ]

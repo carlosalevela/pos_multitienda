@@ -34,9 +34,13 @@ class Compra(models.Model):
     numero_orden    = models.CharField(max_length=30, unique=True)
     total           = models.DecimalField(max_digits=12, decimal_places=2)
     estado          = models.CharField(max_length=20, choices=ESTADO_CHOICES, default="pendiente")
-    fecha_orden     = models.DateTimeField(auto_now_add=True)
-    fecha_recepcion = models.DateTimeField(null=True, blank=True)
-    observaciones   = models.TextField(blank=True)
+    fecha_orden       = models.DateTimeField(auto_now_add=True)
+    fecha_recepcion   = models.DateTimeField(null=True, blank=True)
+    observaciones     = models.TextField(blank=True)
+    # Crédito con proveedor
+    a_credito         = models.BooleanField(default=False)
+    fecha_vencimiento = models.DateField(null=True, blank=True)
+    pagado            = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Orden {self.numero_orden} - {self.proveedor}"
@@ -56,9 +60,11 @@ class DetalleCompra(models.Model):
         "productos.Categoria", on_delete=models.SET_NULL,
         null=True, blank=True, related_name="detalles_compra"
     )
-    cantidad        = models.DecimalField(max_digits=12, decimal_places=2)
-    precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
-    subtotal        = models.DecimalField(max_digits=12, decimal_places=2)
+    cantidad              = models.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario       = models.DecimalField(max_digits=12, decimal_places=2)
+    precio_venta          = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    codigo_barras_input   = models.CharField(max_length=100, blank=True, default='')
+    subtotal              = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
         db_table = "detalle_compras"

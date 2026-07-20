@@ -28,7 +28,8 @@ class Compra(models.Model):
         ("recibida",  "Recibida"),
         ("cancelada", "Cancelada"),
     ]
-    tienda          = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE)
+    tienda          = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE,
+                                       null=True, blank=True)
     proveedor       = models.ForeignKey(Proveedor, on_delete=models.CASCADE)
     empleado        = models.ForeignKey("usuarios.Empleado", on_delete=models.SET_NULL, null=True)
     numero_orden    = models.CharField(max_length=30, unique=True)
@@ -68,3 +69,16 @@ class DetalleCompra(models.Model):
 
     class Meta:
         db_table = "detalle_compras"
+
+
+class DistribucionDetalle(models.Model):
+    """Distribución de un detalle de compra entre varias tiendas."""
+    detalle           = models.ForeignKey(
+        DetalleCompra, on_delete=models.CASCADE, related_name="distribuciones")
+    tienda            = models.ForeignKey("tiendas.Tienda", on_delete=models.CASCADE)
+    cantidad          = models.DecimalField(max_digits=12, decimal_places=2)
+    cantidad_recibida = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    class Meta:
+        db_table      = "distribuciones_detalle"
+        unique_together = [("detalle", "tienda")]

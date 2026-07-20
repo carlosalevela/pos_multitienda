@@ -12,7 +12,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
-from .models import Proveedor, Compra
+from .models import Proveedor, Compra, DistribucionDetalle
 from .serializers import ProveedorSerializer, ProveedorSimpleSerializer, CompraSerializer
 from productos.models import Inventario, MovimientoInventario, Producto, generar_codigo_barras_interno
 from contabilidad.models import Gasto
@@ -105,7 +105,8 @@ class CompraListCreateView(generics.ListCreateAPIView):
             self.request,
             Compra.objects.select_related(
                 "proveedor", "tienda", "empleado"
-            ).prefetch_related("detalles"),
+            ).prefetch_related("detalles__distribuciones"),
+            campo_empresa="proveedor__empresa",
         )
 
         tienda_id = self.request.query_params.get("tienda_id")
@@ -145,10 +146,10 @@ class CompraDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         if es_superadmin(self.request):
-            return Compra.objects.prefetch_related("detalles__producto")
+            return Compra.objects.prefetch_related("detalles__producto", "detalles__distribuciones")
         return Compra.objects.filter(
-            tienda__empresa=get_empresa(self.request)
-        ).prefetch_related("detalles__producto")
+            proveedor__empresa=get_empresa(self.request)
+        ).prefetch_related("detalles__producto", "detalles__distribuciones")
 
 
 class RecibirCompraView(APIView):
@@ -158,10 +159,11 @@ class RecibirCompraView(APIView):
     def post(self, request, pk):
         try:
             qs     = Compra.objects.prefetch_related(
-                "detalles__producto", "detalles__categoria")
+                "detalles__producto", "detalles__categoria",
+                "detalles__distribuciones__tienda")
             compra = qs.get(pk=pk) if es_superadmin(request) \
                 else qs.get(pk=pk,
-                            tienda__empresa=get_empresa(request))
+                            proveedor__empresa=get_empresa(request))
         except Compra.DoesNotExist:
             return Response(
                 {"error": "Compra no encontrada."}, status=404)
@@ -179,7 +181,7 @@ class RecibirCompraView(APIView):
         precios_venta   = request.data.get('precios', {})
         precios_mayoreo = request.data.get('precios_mayoreo', {})
 
-        empresa                = compra.tienda.empresa
+        empresa                = get_empresa(request)
         productos_actualizados = []
 
         for detalle in compra.detalles.all():
@@ -228,51 +230,100 @@ class RecibirCompraView(APIView):
 
             producto.save(update_fields=campos_a_actualizar)
 
-            # Actualizar inventario
-            inv, _ = Inventario.objects.select_for_update().get_or_create(
-                producto = detalle.producto,
-                tienda   = compra.tienda,
-                defaults = {
-                    "stock_actual": 0,
-                    "stock_minimo": 0,
-                    "stock_maximo": 0,
-                }
-            )
-            inv.stock_actual += detalle.cantidad
-            inv.save()
-
-            # Registrar movimiento
-            MovimientoInventario.objects.create(
-                producto        = detalle.producto,
-                tienda          = compra.tienda,
-                empleado        = request.user,
-                tipo            = "entrada",
-                cantidad        = detalle.cantidad,
-                referencia_tipo = "compra",
-                referencia_id   = compra.id,
-                observacion     = f"Recepción orden {compra.numero_orden}",
-            )
-
-            productos_actualizados.append({
-                "producto":          producto.nombre,
-                "es_nuevo":          detalle.nombre_libre != "",
-                "codigo_barras":     producto.codigo_barras,
-                "categoria":         detalle.categoria.nombre
-                                     if detalle.categoria else None,
-                "cantidad_recibida": float(detalle.cantidad),
-                "stock_actual":      float(inv.stock_actual),
-                "precio_venta":  float(producto.precio_venta),
-                "precio_compra": float(producto.precio_compra),
-            })
+            # Actualizar inventario (multi-tienda o single-tienda)
+            distribuciones = list(detalle.distribuciones.all())
+            if distribuciones:
+                # Distribuir stock por tienda según DistribucionDetalle
+                stock_por_tienda = []
+                for dist in distribuciones:
+                    inv, _ = Inventario.objects.select_for_update().get_or_create(
+                        producto = detalle.producto,
+                        tienda   = dist.tienda,
+                        defaults = {
+                            "stock_actual": 0,
+                            "stock_minimo": 0,
+                            "stock_maximo": 0,
+                        }
+                    )
+                    inv.stock_actual += dist.cantidad
+                    inv.save()
+                    dist.cantidad_recibida = dist.cantidad
+                    dist.save()
+                    MovimientoInventario.objects.create(
+                        producto        = detalle.producto,
+                        tienda          = dist.tienda,
+                        empleado        = request.user,
+                        tipo            = "entrada",
+                        cantidad        = dist.cantidad,
+                        referencia_tipo = "compra",
+                        referencia_id   = compra.id,
+                        observacion     = (f"Recepción {compra.numero_orden} "
+                                          f"→ {dist.tienda.nombre}"),
+                    )
+                    stock_por_tienda.append(
+                        f"{dist.tienda.nombre}: {float(dist.cantidad)}")
+                productos_actualizados.append({
+                    "producto":          producto.nombre,
+                    "es_nuevo":          detalle.nombre_libre != "",
+                    "codigo_barras":     producto.codigo_barras,
+                    "categoria":         detalle.categoria.nombre
+                                         if detalle.categoria else None,
+                    "cantidad_recibida": float(detalle.cantidad),
+                    "distribucion":      stock_por_tienda,
+                    "precio_venta":  float(producto.precio_venta),
+                    "precio_compra": float(producto.precio_compra),
+                })
+            else:
+                # Modo legacy: todo va a compra.tienda
+                inv, _ = Inventario.objects.select_for_update().get_or_create(
+                    producto = detalle.producto,
+                    tienda   = compra.tienda,
+                    defaults = {
+                        "stock_actual": 0,
+                        "stock_minimo": 0,
+                        "stock_maximo": 0,
+                    }
+                )
+                inv.stock_actual += detalle.cantidad
+                inv.save()
+                MovimientoInventario.objects.create(
+                    producto        = detalle.producto,
+                    tienda          = compra.tienda,
+                    empleado        = request.user,
+                    tipo            = "entrada",
+                    cantidad        = detalle.cantidad,
+                    referencia_tipo = "compra",
+                    referencia_id   = compra.id,
+                    observacion     = f"Recepción orden {compra.numero_orden}",
+                )
+                productos_actualizados.append({
+                    "producto":          producto.nombre,
+                    "es_nuevo":          detalle.nombre_libre != "",
+                    "codigo_barras":     producto.codigo_barras,
+                    "categoria":         detalle.categoria.nombre
+                                         if detalle.categoria else None,
+                    "cantidad_recibida": float(detalle.cantidad),
+                    "stock_actual":      float(inv.stock_actual),
+                    "precio_venta":  float(producto.precio_venta),
+                    "precio_compra": float(producto.precio_compra),
+                })
 
         compra.estado          = "recibida"
         compra.fecha_recepcion = timezone.now()
         compra.save()
 
         # Registrar gasto contable
-        if compra.total > 0:
+        tienda_gasto = compra.tienda
+        if tienda_gasto is None:
+            # Para compras multi-tienda tomamos la tienda del primer detalle con distribución
+            for d in compra.detalles.all():
+                primera = d.distribuciones.first()
+                if primera:
+                    tienda_gasto = primera.tienda
+                    break
+        if tienda_gasto and compra.total > 0:
             Gasto.objects.create(
-                tienda      = compra.tienda,
+                tienda      = tienda_gasto,
                 empleado    = request.user,
                 categoria   = 'proveedor',
                 descripcion = (f'Recepción {compra.numero_orden} — '
@@ -282,9 +333,10 @@ class RecibirCompraView(APIView):
                 visibilidad = 'solo_admin',
             )
 
+        tienda_nombre = compra.tienda.nombre if compra.tienda else "Multi-tienda"
         return Response({
             "detail":    f"Compra {compra.numero_orden} recibida correctamente.",
-            "tienda":    compra.tienda.nombre,
+            "tienda":    tienda_nombre,
             "productos": productos_actualizados,
         })
 
@@ -298,7 +350,7 @@ class CancelarCompraView(APIView):
                 if es_superadmin(request) \
                 else Compra.objects.get(
                     pk=pk,
-                    tienda__empresa=get_empresa(request))
+                    proveedor__empresa=get_empresa(request))
         except Compra.DoesNotExist:
             return Response(
                 {"error": "Compra no encontrada."}, status=404)

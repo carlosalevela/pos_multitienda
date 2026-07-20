@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Proveedor, Compra, DetalleCompra
+from .models import Proveedor, Compra, DetalleCompra, DistribucionDetalle
 from productos.models import Categoria
 from core.permissions import es_superadmin, get_empresa
 
@@ -43,6 +43,21 @@ class ProveedorSimpleSerializer(serializers.ModelSerializer):
         read_only_fields = ["empresa"]
 
 
+# ── Distribución Detalle ───────────────────────────────────────
+
+class DistribucionDetalleSerializer(serializers.ModelSerializer):
+    tienda_nombre = serializers.CharField(source="tienda.nombre", read_only=True)
+
+    class Meta:
+        model  = DistribucionDetalle
+        fields = ["id", "tienda", "tienda_nombre", "cantidad", "cantidad_recibida"]
+        read_only_fields = ["id", "cantidad_recibida"]
+        extra_kwargs = {
+            "tienda":    {"required": True},
+            "cantidad":  {"required": True},
+        }
+
+
 # ── Detalle Compra ─────────────────────────────────────────────
 
 class DetalleCompraSerializer(serializers.ModelSerializer):
@@ -52,6 +67,7 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
     categoria_nombre_input = serializers.CharField(
         write_only=True, required=False,
         allow_blank=True, default='')
+    distribuciones = DistribucionDetalleSerializer(many=True, required=False, default=list)
 
     class Meta:
         model  = DetalleCompra
@@ -60,7 +76,8 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
             "nombre_libre", "categoria", "categoria_nombre",
             "categoria_nombre_input",
             "cantidad", "precio_unitario", "precio_venta",
-            "codigo_barras_input", "subtotal"
+            "codigo_barras_input", "subtotal",
+            "distribuciones",
         ]
         read_only_fields = ["id", "subtotal"]
         extra_kwargs = {
@@ -95,12 +112,16 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        distribuciones_data = validated_data.pop("distribuciones", [])
         nombre_cat = validated_data.pop("categoria_nombre_input", "") or ""
         if nombre_cat.strip():
             empresa = get_empresa(self.context["request"])
             validated_data["categoria"] = _resolver_categoria(
                 nombre_cat, empresa)
-        return super().create(validated_data)
+        detalle = super().create(validated_data)
+        for dist in distribuciones_data:
+            DistribucionDetalle.objects.create(detalle=detalle, **dist)
+        return detalle
 
 
 # ── Compra ─────────────────────────────────────────────────────
@@ -109,8 +130,7 @@ class CompraSerializer(serializers.ModelSerializer):
     detalles         = DetalleCompraSerializer(many=True)
     proveedor_nombre = serializers.CharField(
         source="proveedor.nombre", read_only=True)
-    tienda_nombre    = serializers.CharField(
-        source="tienda.nombre",    read_only=True)
+    tienda_nombre    = serializers.SerializerMethodField()
     empleado_nombre  = serializers.SerializerMethodField()
 
     class Meta:
@@ -129,6 +149,12 @@ class CompraSerializer(serializers.ModelSerializer):
             "id", "total", "fecha_orden",
             "empleado", "numero_orden"
         ]
+        extra_kwargs = {
+            "tienda": {"required": False, "allow_null": True},
+        }
+
+    def get_tienda_nombre(self, obj):
+        return obj.tienda.nombre if obj.tienda else None
 
     def get_empleado_nombre(self, obj):
         if obj.empleado:
@@ -136,6 +162,8 @@ class CompraSerializer(serializers.ModelSerializer):
         return None
 
     def validate_tienda(self, tienda):
+        if tienda is None:
+            return None
         request = self.context.get("request")
         if request and not es_superadmin(request):
             if tienda.empresa != get_empresa(request):
@@ -151,6 +179,17 @@ class CompraSerializer(serializers.ModelSerializer):
                     "El proveedor no pertenece a tu empresa.")
         return proveedor
 
+    def validate(self, attrs):
+        tienda   = attrs.get("tienda")
+        detalles = attrs.get("detalles", [])
+        if tienda is None and detalles:
+            for d in detalles:
+                if not d.get("distribuciones"):
+                    raise serializers.ValidationError(
+                        "En pedidos multi-tienda, todos los productos deben "
+                        "especificar la distribución por tienda.")
+        return attrs
+
     def create(self, validated_data):
         detalles_data = validated_data.pop("detalles")
         empresa       = get_empresa(self.context["request"])
@@ -161,12 +200,15 @@ class CompraSerializer(serializers.ModelSerializer):
             total=total, **validated_data)
 
         for detalle in detalles_data:
+            distribuciones_data = detalle.pop("distribuciones", [])
             nombre_cat = detalle.pop("categoria_nombre_input", "") or ""
             if nombre_cat.strip() and not detalle.get("categoria"):
                 detalle["categoria"] = _resolver_categoria(
                     nombre_cat, empresa)
             detalle["subtotal"] = (
                 detalle["cantidad"] * detalle["precio_unitario"])
-            DetalleCompra.objects.create(compra=compra, **detalle)
+            det_obj = DetalleCompra.objects.create(compra=compra, **detalle)
+            for dist in distribuciones_data:
+                DistribucionDetalle.objects.create(detalle=det_obj, **dist)
 
         return compra

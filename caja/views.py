@@ -104,11 +104,13 @@ class CerrarCajaView(APIView):
             sesion_caja=sesion, metodo_pago="efectivo",
         ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        base_a = sesion.movimientos.filter(tipo="abono_separado")
+        base_a  = sesion.movimientos.filter(tipo="abono_separado")
+        base_ac = sesion.movimientos.filter(tipo="abono_credito")
         abonos_efectivo      = base_a.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_tarjeta       = base_a.filter(metodo_pago="tarjeta").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_transferencia = base_a.filter(metodo_pago="transferencia").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_total         = abonos_efectivo + abonos_tarjeta + abonos_transferencia
+        credito_efectivo     = base_ac.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
         base_d = Devolucion.objects.filter(venta__sesion_caja=sesion, estado="procesada")
         dev_efectivo     = base_d.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
@@ -117,7 +119,9 @@ class CerrarCajaView(APIView):
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
 
         monto_sistema = (
-            sesion.monto_inicial + total_ventas + abonos_efectivo - total_gastos - neto_dev_efectivo
+            sesion.monto_inicial + total_ventas
+            + abonos_efectivo + credito_efectivo
+            - total_gastos - neto_dev_efectivo
         )
         diferencia = monto_real - monto_sistema
 
@@ -255,6 +259,8 @@ class ResumenCierreView(APIView):
         a_transferencia = agg(base_a.filter(metodo_pago="transferencia"))
         a_tarjeta       = agg(base_a.filter(metodo_pago="tarjeta"))
         num_abonos      = base_a.count()
+        base_ac         = sesion.movimientos.filter(tipo="abono_credito")
+        ac_efectivo     = agg(base_ac.filter(metodo_pago="efectivo"))
 
         dev_efectivo     = dsum(base_d.filter(tipo="devolucion", metodo_devolucion="efectivo"))
         cambios_cobrar   = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo"))
@@ -262,7 +268,9 @@ class ResumenCierreView(APIView):
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
 
         monto_esperado = (
-            sesion.monto_inicial + v_efectivo + v_mixto + a_efectivo - g_efectivo - neto_dev_efectivo
+            sesion.monto_inicial + v_efectivo + v_mixto
+            + a_efectivo + ac_efectivo
+            - g_efectivo - neto_dev_efectivo
         )
 
         nombre = (

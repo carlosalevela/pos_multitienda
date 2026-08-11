@@ -8,6 +8,7 @@ class Venta(models.Model):
         ("tarjeta",       "Tarjeta"),
         ("transferencia", "Transferencia"),
         ("mixto",         "Mixto"),
+        ("credito",       "Crédito"),
     ]
     ESTADOS = [
         ("completada", "Completada"),
@@ -57,6 +58,8 @@ class Venta(models.Model):
     monto_recibido  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     vuelto          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
+    a_credito       = models.BooleanField(default=False)
+
     estado          = models.CharField(
         max_length=20,
         choices=ESTADOS,
@@ -91,10 +94,12 @@ class Venta(models.Model):
     # ── Helpers de pagos ─────────────────────────────────────────────────────
     @property
     def total_pagado(self):
-        """Suma real de todos los pagos registrados en PagoVenta."""
-        return self.pagos.aggregate(
-            total=models.Sum("monto")
-        )["total"] or 0
+        """Suma real de todos los pagos. Usa el prefetch cache si está disponible
+        para evitar N+1 en vistas de lista (CarteraView, CreditosClienteView)."""
+        cache = getattr(self, '_prefetched_objects_cache', {})
+        if 'pagos' in cache:
+            return sum(p.monto for p in self.pagos.all())
+        return self.pagos.aggregate(total=models.Sum("monto"))["total"] or 0
 
     @property
     def saldo_pendiente(self):

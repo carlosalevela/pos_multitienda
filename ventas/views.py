@@ -3,7 +3,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
-from django.db.models import F, Sum
+from django.db.models import Count, F, Sum
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.permissions import IsAuthenticated
@@ -96,6 +96,32 @@ class CrearVentaView(APIView):
                 observacion=f"Venta {venta.numero_factura}",
             )
 
+        tier_feedback = None
+        if venta.cliente_id:
+            from clientes.models import Cliente, TierConfig
+            cli = Cliente.objects.get(pk=venta.cliente_id)
+            total_acum = float(cli.total_acumulado)
+            tier = cli.tier_actual
+            siguiente = TierConfig.objects.filter(
+                empresa=cli.empresa,
+                activo=True,
+                umbral_min__gt=total_acum,
+            ).order_by("umbral_min").first()
+            tier_feedback = {
+                "total_acumulado": total_acum,
+                "tier_actual": {
+                    "nombre":        tier.nombre,
+                    "descuento_pct": float(tier.descuento_pct),
+                    "color_hex":     tier.color_hex,
+                } if tier else None,
+                "siguiente_tier": {
+                    "nombre":        siguiente.nombre,
+                    "umbral_min":    float(siguiente.umbral_min),
+                    "descuento_pct": float(siguiente.descuento_pct),
+                    "color_hex":     siguiente.color_hex,
+                } if siguiente else None,
+            }
+
         return Response({
             "detail":         "Venta registrada correctamente.",
             "numero_factura": venta.numero_factura,
@@ -113,7 +139,8 @@ class CrearVentaView(APIView):
                     "subtotal": float(d.subtotal),
                 }
                 for d in venta.detalles.all()
-            ]
+            ],
+            "tier_feedback": tier_feedback,
         }, status=201)
 
 
@@ -296,6 +323,149 @@ class CambioPOSView(APIView):
         )
 
 
+# ── Abonar a crédito ──────────────────────────────────────
+class AbonarCreditoView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        from .models import PagoVenta
+        empresa = get_empresa(request)
+        try:
+            venta = Venta.objects.prefetch_related('pagos').get(
+                pk=pk, empresa=empresa, a_credito=True)
+        except Venta.DoesNotExist:
+            return Response({'error': 'Venta a crédito no encontrada.'}, status=404)
+
+        if venta.estado == 'anulada':
+            return Response({'error': 'La venta está anulada.'}, status=400)
+
+        try:
+            monto = Decimal(str(request.data.get('monto', 0)))
+        except Exception:
+            return Response({'error': 'Monto inválido.'}, status=400)
+
+        metodo = request.data.get('metodo', 'efectivo')
+        if metodo not in ('efectivo', 'tarjeta', 'transferencia'):
+            return Response({'error': 'Método de pago no válido.'}, status=400)
+
+        saldo = venta.saldo_pendiente
+        if monto <= 0:
+            return Response({'error': 'El monto debe ser mayor a cero.'}, status=400)
+        if monto > saldo:
+            return Response(
+                {'error': f'El monto supera el saldo pendiente (${saldo:.0f}).'},
+                status=400)
+
+        PagoVenta.objects.create(venta=venta, metodo=metodo, monto=monto)
+
+        # Registrar en caja para cuadre: busca la sesión abierta de la tienda
+        try:
+            from caja.models import SesionCaja, MovimientoCaja
+            from usuarios.models import Empleado
+            tienda_id = venta.sesion_caja.tienda_id if venta.sesion_caja_id else None
+            if tienda_id:
+                sesion_activa = SesionCaja.objects.filter(
+                    tienda_id=tienda_id, estado="abierta"
+                ).first()
+                if sesion_activa:
+                    empleado = Empleado.objects.filter(usuario=request.user).first()
+                    MovimientoCaja.objects.create(
+                        sesion=sesion_activa,
+                        tipo="abono_credito",
+                        metodo_pago=metodo,
+                        monto=monto,
+                        descripcion=f"Abono crédito {venta.numero_factura}",
+                        referencia_id=venta.id,
+                        empleado=empleado,
+                    )
+        except Exception:
+            pass  # No bloquear el abono si falla el registro de caja
+
+        # Recargar saldo desde DB para que saldo_pendiente sea exacto
+        venta.refresh_from_db()
+        venta_fresh = Venta.objects.prefetch_related('pagos').get(pk=venta.pk)
+        nuevo_saldo = venta_fresh.saldo_pendiente
+        return Response({
+            'saldo_anterior':  float(saldo),
+            'abono':           float(monto),
+            'saldo_pendiente': float(nuevo_saldo),
+            'pagado':          nuevo_saldo <= 0,
+        })
+
+
+# ── Cartera (cuentas por cobrar de créditos) ─────────────
+class CarteraView(APIView):
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from collections import defaultdict
+        empresa   = get_empresa(request)
+        tienda_id = request.query_params.get("tienda_id")
+
+        qs = (
+            Venta.objects
+            .filter(empresa=empresa, a_credito=True, estado="completada")
+            .prefetch_related("pagos")
+            .select_related("cliente", "tienda")
+            .order_by("cliente_id", "-created_at")
+        )
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+
+        cartera: dict = defaultdict(lambda: {
+            "cliente_id":      None,
+            "cliente_nombre":  "",
+            "limite_credito":  Decimal("0"),
+            "deuda_total":     Decimal("0"),
+            "ventas":          [],
+        })
+
+        for v in qs:
+            if not v.cliente_id:
+                continue
+            saldo = v.saldo_pendiente
+            if saldo <= Decimal("0"):
+                continue
+            cid = v.cliente_id
+            row = cartera[cid]
+            if row["cliente_id"] is None:
+                row["cliente_id"]     = v.cliente_id
+                row["cliente_nombre"] = f"{v.cliente.nombre} {v.cliente.apellido}"
+                row["limite_credito"] = v.cliente.limite_credito
+            row["deuda_total"] += saldo
+            row["ventas"].append({
+                "id":              v.id,
+                "numero_factura":  v.numero_factura,
+                "total":           float(v.total),
+                "saldo_pendiente": float(saldo),
+                "fecha":           v.created_at.isoformat(),
+                "tienda":          v.tienda.nombre if v.tienda else "",
+            })
+
+        result = []
+        total_cartera = Decimal("0")
+        for data in cartera.values():
+            deuda = data["deuda_total"]
+            total_cartera += deuda
+            result.append({
+                "cliente_id":        data["cliente_id"],
+                "cliente_nombre":    data["cliente_nombre"],
+                "limite_credito":    float(data["limite_credito"]),
+                "deuda_total":       float(deuda),
+                "credito_disponible": float(data["limite_credito"] - deuda),
+                "num_facturas":      len(data["ventas"]),
+                "ventas":            data["ventas"],
+            })
+
+        result.sort(key=lambda x: x["deuda_total"], reverse=True)
+        return Response({
+            "total_cartera": float(total_cartera),
+            "num_clientes":  len(result),
+            "cartera":       result,
+        })
+
+
 # ── Dashboard general Admin ───────────────────────────────
 class DashboardAdminView(APIView):
     permission_classes = [EsAdminOSupervisor]
@@ -455,6 +625,22 @@ class DashboardAdminView(APIView):
 
         desempeno.sort(key=lambda x: x["ventas_hoy"], reverse=True)
 
+        # ── Desglose por método de pago (período) ─────────
+        metodos_raw = (
+            venta_qs.filter(created_at__gte=inicio_periodo)
+            .values("metodo_pago")
+            .annotate(total=Sum("total"), count=Count("id"))
+            .order_by("-total")
+        )
+        metodos_pago = [
+            {
+                "metodo": r["metodo_pago"],
+                "total":  float(r["total"] or 0),
+                "count":  r["count"],
+            }
+            for r in metodos_raw
+        ]
+
         return Response({
             "kpis": {
                 "ventas_hoy":               float(ventas_hoy),
@@ -468,4 +654,5 @@ class DashboardAdminView(APIView):
             "ventas_por_tienda":       ventas_por_tienda,
             "transacciones_recientes": transacciones,
             "desempeno_tiendas":       desempeno,
+            "metodos_pago":            metodos_pago,
         })

@@ -1,7 +1,7 @@
 from django.urls import path
 from .views import (
     ClienteListCreateView, ClienteDetailView, ClienteSimpleListView,
-    ClienteResumenView,
+    ClienteResumenView, CreditosClienteView,
     SeparadoListCreateView, SeparadoDetailView,
     AbonarSeparadoView, CancelarSeparadoView,
     AlertasSeparadosView, AbonosPorFechaView,
@@ -18,6 +18,7 @@ urlpatterns = [
     path("simple/",             ClienteSimpleListView.as_view(), name="clientes_simple"),
     path("<int:pk>/",           ClienteDetailView.as_view(),     name="cliente_detail"),
     path("<int:pk>/resumen/",   ClienteResumenView.as_view(),    name="cliente_resumen"),
+    path("<int:pk>/creditos/",  CreditosClienteView.as_view(),   name="cliente_creditos"),
 
     # ── Separados — rutas fijas ANTES que las dinámicas ───────
     path("separados/",          SeparadoListCreateView.as_view(), name="separados"),

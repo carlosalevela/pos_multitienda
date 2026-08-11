@@ -50,7 +50,7 @@ class VentaSerializer(serializers.ModelSerializer):
             "sesion_caja", "cliente", "cliente_nombre",
             "empleado", "empleado_nombre",
             "subtotal", "descuento_total", "impuesto_total",
-            "total", "metodo_pago",
+            "total", "metodo_pago", "a_credito",
             "monto_recibido", "vuelto",
             "estado", "observaciones",
             "created_at", "detalles"
@@ -100,10 +100,20 @@ class VentaSerializer(serializers.ModelSerializer):
         sesion = attrs.get("sesion_caja")
         if sesion and sesion.estado != "abierta":
             raise serializers.ValidationError("La sesión de caja no está abierta.")
+
+        if attrs.get("a_credito"):
+            cliente = attrs.get("cliente")
+            if not cliente:
+                raise serializers.ValidationError(
+                    "Debes seleccionar un cliente para una venta a crédito.")
+            if cliente.limite_credito <= 0:
+                raise serializers.ValidationError(
+                    f"{cliente.nombre} no tiene crédito habilitado.")
         return attrs
 
     def create(self, validated_data):
         detalles_data    = validated_data.pop("detalles")
+        a_credito        = validated_data.get("a_credito", False)
         metodo_pago      = validated_data.get("metodo_pago", "efectivo")
         monto_recibido   = validated_data.get("monto_recibido", Decimal("0"))
         descuento_global = validated_data.pop("descuento_total", Decimal("0"))
@@ -122,7 +132,33 @@ class VentaSerializer(serializers.ModelSerializer):
 
         descuento_total = descuento_item + descuento_global
         total  = subtotal - descuento_total + impuesto_total
-        vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
+
+        if a_credito:
+            # Calcular deuda actual con dos queries directas y sin riesgo de
+            # multiplicación por JOIN (annotate + aggregate sobre el mismo join
+            # puede inflar Sum("total") si hay múltiples pagos por venta).
+            cliente = validated_data["cliente"]
+            from django.db.models import Sum
+            from .models import PagoVenta
+            base = dict(cliente=cliente, a_credito=True, estado="completada")
+            total_vendido = Venta.objects.filter(**base).aggregate(
+                t=Sum("total"))["t"] or Decimal("0")
+            total_abonado = PagoVenta.objects.filter(
+                venta__cliente=cliente, venta__a_credito=True,
+                venta__estado="completada",
+            ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            deuda_actual  = max(total_vendido - total_abonado, Decimal("0"))
+
+            if deuda_actual + total > cliente.limite_credito:
+                disponible = cliente.limite_credito - deuda_actual
+                raise serializers.ValidationError(
+                    f"Supera el límite de crédito. Disponible: ${disponible:.0f}")
+
+            validated_data["metodo_pago"]    = "credito"
+            validated_data["monto_recibido"] = Decimal("0")
+            vuelto = Decimal("0")
+        else:
+            vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
 
         empresa = get_empresa(self.context["request"])
         numero  = Venta.generar_numero_factura(empresa)

@@ -43,6 +43,7 @@ class Cliente(models.Model):
     direccion       = models.CharField(max_length=200, blank=True)
     activo          = models.BooleanField(default=True)
     total_acumulado = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    limite_credito  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     created_at      = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

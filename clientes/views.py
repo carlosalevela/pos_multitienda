@@ -468,6 +468,45 @@ class AlertasSeparadosView(APIView):
         })
 
 
+# ── Créditos de un cliente ────────────────────────────────
+class CreditosClienteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        from ventas.models import Venta
+        empresa  = get_empresa(request)
+        cliente  = Cliente.objects.filter(pk=pk, empresa=empresa).first()
+        if not cliente:
+            return Response({'error': 'Cliente no encontrado.'}, status=404)
+
+        ventas_qs = Venta.objects.filter(
+            cliente=cliente, a_credito=True, estado='completada', empresa=empresa
+        ).prefetch_related('pagos').order_by('-created_at')
+
+        ventas_data = []
+        deuda_total = Decimal('0')
+        for v in ventas_qs:
+            saldo = v.saldo_pendiente
+            deuda_total += max(saldo, Decimal('0'))
+            ventas_data.append({
+                'id':               v.id,
+                'numero_factura':   v.numero_factura,
+                'total':            float(v.total),
+                'total_pagado':     float(v.total_pagado),
+                'saldo_pendiente':  float(max(saldo, Decimal('0'))),
+                'fecha':            v.created_at.isoformat(),
+                'estado_credito':   'pagado' if saldo <= 0 else 'pendiente',
+            })
+
+        return Response({
+            'cliente_id':        cliente.id,
+            'limite_credito':    float(cliente.limite_credito),
+            'deuda_total':       float(deuda_total),
+            'credito_disponible': float(cliente.limite_credito - deuda_total),
+            'ventas':            ventas_data,
+        })
+
+
 # ── Abonos por fecha ──────────────────────────────────────
 class AbonosPorFechaView(APIView):
     permission_classes = [IsAuthenticated]

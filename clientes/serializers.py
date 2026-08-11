@@ -47,7 +47,7 @@ class ClienteSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'empresa', 'tienda', 'nombre', 'apellido', 'cedula_nit',
             'telefono', 'email', 'direccion',
-            'activo', 'total_acumulado', 'tier_info', 'created_at',
+            'activo', 'total_acumulado', 'limite_credito', 'tier_info', 'created_at',
         ]
         read_only_fields = ['id', 'empresa', 'total_acumulado', 'created_at']
 
@@ -73,7 +73,7 @@ class ClienteSimpleSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = Cliente
-        fields = ['id', 'nombre', 'apellido', 'cedula_nit', 'telefono', 'tier_info']
+        fields = ['id', 'nombre', 'apellido', 'cedula_nit', 'telefono', 'limite_credito', 'tier_info']
 
     def get_tier_info(self, obj):
         return _tier_info(obj)

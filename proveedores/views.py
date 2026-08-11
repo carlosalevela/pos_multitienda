@@ -884,9 +884,9 @@ class MarcarPagadaView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def patch(self, request, pk):
-        try:
-            compra = Compra.objects.get(pk=pk)
-        except Compra.DoesNotExist:
+        empresa = get_empresa(request)
+        compra = Compra.objects.filter(pk=pk, proveedor__empresa=empresa).first()
+        if not compra:
             return Response({"error": "Compra no encontrada."}, status=404)
 
         if not compra.a_credito:

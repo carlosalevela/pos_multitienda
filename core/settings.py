@@ -169,3 +169,27 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
+
+
+# ── Seguridad en producción (solo cuando DEBUG=False) ──────────
+if not DEBUG:
+    # Railway termina SSL en su load balancer y pasa HTTP a Django.
+    # No usar SECURE_SSL_REDIRECT=True aquí (causaría loop infinito).
+    # En cambio, le decimos a Django que confíe en el header X-Forwarded-Proto.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+    # Cookies seguras (solo viajan por HTTPS)
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE    = True
+
+    # HSTS: el navegador recuerda que el sitio es solo HTTPS (31 días)
+    SECURE_HSTS_SECONDS        = 2_592_000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+
+    # Evita que el navegador adivine el content-type
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+
+# Silenciar warnings que no aplican a Railway:
+# W008: SSL lo termina el load balancer de Railway, no Django
+# W021: HSTS preload es para sitios públicos de alto perfil
+SILENCED_SYSTEM_CHECKS = ['security.W008', 'security.W021']

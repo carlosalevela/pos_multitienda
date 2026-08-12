@@ -1,4 +1,5 @@
 from django.db import models
+from django.db.models import Q, UniqueConstraint
 
 
 class SesionCaja(models.Model):
@@ -20,6 +21,13 @@ class SesionCaja(models.Model):
 
     class Meta:
         db_table = "sesiones_caja"
+        constraints = [
+            UniqueConstraint(
+                fields=["tienda"],
+                condition=Q(estado="abierta"),
+                name="una_sesion_abierta_por_tienda",
+            )
+        ]
 
 
 # ✅ NUEVO

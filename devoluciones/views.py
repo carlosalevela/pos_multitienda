@@ -11,7 +11,7 @@ from core.permissions import (
     es_superadmin, get_empresa, scope_qs,
 )
 from productos.models import Inventario, MovimientoInventario, Producto
-from ventas.models import Venta
+from ventas.models import PagoVenta, Venta
 from .models import Devolucion, DetalleDevolucion
 from .serializers import DevolucionSerializer
 
@@ -157,6 +157,17 @@ class CrearDevolucionView(APIView):
         devolucion = serializer.save(
             empleado=request.user, tienda=venta.tienda)
         _restaurar_stock(devolucion, request.user, venta)
+
+        # Si la venta fue a crédito, reducir la deuda pendiente
+        if venta.a_credito:
+            saldo = venta.saldo_pendiente
+            if saldo > 0:
+                aplicar = min(devolucion.total_devuelto, saldo)
+                PagoVenta.objects.create(
+                    venta=venta,
+                    metodo="nota_credito",
+                    monto=aplicar,
+                )
 
         return Response({
             "detail":          "Devolución procesada correctamente.",

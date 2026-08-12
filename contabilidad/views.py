@@ -316,7 +316,10 @@ class ResumenAnualView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        anio      = int(request.query_params.get("anio", timezone.now().year))
+        try:
+            anio = int(request.query_params.get("anio", timezone.now().year))
+        except (TypeError, ValueError):
+            anio = timezone.now().year
         tienda_id = request.query_params.get("tienda_id")
 
         ventas_qs = Venta.objects.filter(estado="completada", created_at__year=anio)
@@ -1019,7 +1022,10 @@ class TopClientesView(APIView):
         fecha_ini = request.query_params.get('fecha_ini')
         fecha_fin = request.query_params.get('fecha_fin')
         fecha     = request.query_params.get('fecha')
-        limite    = int(request.query_params.get('limite', 5))
+        try:
+            limite = int(request.query_params.get('limite', 5))
+        except (TypeError, ValueError):
+            limite = 5
 
         if request.user.rol == 'cajero':
             tienda_id = str(request.user.tienda_id)
@@ -1289,7 +1295,10 @@ class RentabilidadProductosView(APIView):
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
-        limite    = int(request.query_params.get("limite", 50))
+        try:
+            limite = int(request.query_params.get("limite", 50))
+        except (TypeError, ValueError):
+            limite = 50
 
         qs = DetalleVenta.objects.filter(
             venta__estado="completada",
@@ -1305,6 +1314,10 @@ class RentabilidadProductosView(APIView):
             Coalesce(F("costo_unitario"), Value(Decimal("0"))) * F("cantidad"),
             output_field=OrmDecimal(max_digits=14, decimal_places=2),
         )
+        utilidad_expr = ExpressionWrapper(
+            Sum("subtotal") - Sum(costo_expr),
+            output_field=OrmDecimal(max_digits=14, decimal_places=2),
+        )
 
         rows = (
             qs
@@ -1313,8 +1326,9 @@ class RentabilidadProductosView(APIView):
                 cantidad_vendida=Sum("cantidad"),
                 ingresos=Sum("subtotal"),
                 costo_total=Sum(costo_expr),
+                utilidad_sql=utilidad_expr,
             )
-            .order_by("-ingresos")[:limite]
+            .order_by("-utilidad_sql")[:limite]
         )
 
         productos = []
@@ -1334,9 +1348,6 @@ class RentabilidadProductosView(APIView):
                 "margen_pct":        margen,
                 "tiene_costo":       costo_total > 0,
             })
-
-        # ordenar por utilidad descendente
-        productos.sort(key=lambda x: x["utilidad"], reverse=True)
 
         return Response({
             "periodo":   {"desde": str(fecha_ini), "hasta": str(fecha_fin), "tienda_id": tienda_id},

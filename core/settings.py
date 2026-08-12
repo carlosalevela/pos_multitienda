@@ -193,3 +193,48 @@ if not DEBUG:
 # W008: SSL lo termina el load balancer de Railway, no Django
 # W021: HSTS preload es para sitios públicos de alto perfil
 SILENCED_SYSTEM_CHECKS = ['security.W008', 'security.W021']
+
+
+# ── Logging ────────────────────────────────────────────────────
+LOGS_DIR = BASE_DIR / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {
+            'format': '{asctime} {levelname} {name} {message}',
+            'style': '{',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'formatter': 'verbose',
+        },
+        'file': {
+            'class': 'logging.handlers.RotatingFileHandler',
+            'filename': LOGS_DIR / 'django.log',
+            'maxBytes': 5 * 1024 * 1024,  # 5 MB
+            'backupCount': 3,
+            'formatter': 'verbose',
+        },
+    },
+    'root': {
+        'handlers': ['console'] if not DEBUG else ['console', 'file'],
+        'level': 'WARNING',
+    },
+    'loggers': {
+        'django': {
+            'handlers': ['console'] if not DEBUG else ['console', 'file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
+        'django.request': {
+            'handlers': ['console'] if not DEBUG else ['console', 'file'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}

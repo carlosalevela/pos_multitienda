@@ -41,12 +41,12 @@ class EmpresaDetailView(generics.RetrieveUpdateAPIView):
         return Empresa.objects.none()
 
     def update(self, request, *args, **kwargs):
-        if not es_superadmin(request):
-            campos_bloqueados = ["nit"]
-            for campo in campos_bloqueados:
-                if campo in request.data:
-                    raise PermissionDenied(
-                        f"No tienes permiso para modificar '{campo}'.")
+        if not (es_superadmin(request) or request.user.rol == 'admin'):
+            raise PermissionDenied(
+                "Solo el administrador puede modificar los datos de la empresa.")
+        if not es_superadmin(request) and 'nit' in request.data:
+            raise PermissionDenied(
+                "No tienes permiso para modificar 'nit'.")
         return super().update(request, *args, **kwargs)
 
 

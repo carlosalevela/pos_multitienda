@@ -225,8 +225,9 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         v_mx   = vsum(base_v.filter(metodo_pago="mixto"))
         g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
         a_ef   = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
+        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
         dev_ef = self._dev_efectivo_neto(obj)   # reutiliza el resultado cacheado
-        return float(obj.monto_inicial + v_ef + v_mx + a_ef - g_ef - dev_ef)
+        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef - g_ef - dev_ef)
 
 
 class AbrirCajaSerializer(serializers.Serializer):

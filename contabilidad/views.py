@@ -217,8 +217,15 @@ class ResumenMensualView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        anio      = request.query_params.get("anio",  str(timezone.now().year))
-        mes       = request.query_params.get("mes",   str(timezone.now().month))
+        now = timezone.now()
+        try:
+            anio = int(request.query_params.get("anio", now.year))
+        except (TypeError, ValueError):
+            anio = now.year
+        try:
+            mes = int(request.query_params.get("mes", now.month))
+        except (TypeError, ValueError):
+            mes = now.month
         tienda_id = request.query_params.get("tienda_id")
 
         ventas_qs = Venta.objects.filter(estado="completada", created_at__year=anio, created_at__month=mes)
@@ -1311,7 +1318,11 @@ class RentabilidadProductosView(APIView):
             qs = qs.filter(venta__tienda_id=tienda_id)
 
         costo_expr = ExpressionWrapper(
-            Coalesce(F("costo_unitario"), Value(Decimal("0"))) * F("cantidad"),
+            Coalesce(
+                F("costo_unitario"),
+                F("producto__precio_compra"),
+                Value(Decimal("0")),
+            ) * F("cantidad"),
             output_field=OrmDecimal(max_digits=14, decimal_places=2),
         )
         utilidad_expr = ExpressionWrapper(

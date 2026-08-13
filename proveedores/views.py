@@ -181,7 +181,9 @@ class RecibirCompraView(APIView):
         precios_venta   = request.data.get('precios', {})
         precios_mayoreo = request.data.get('precios_mayoreo', {})
 
-        empresa                = get_empresa(request)
+        # Superadmin: inferir empresa desde el proveedor de la compra
+        empresa = get_empresa(request) or compra.proveedor.empresa
+        empleado_obj           = request.user
         productos_actualizados = []
 
         for detalle in compra.detalles.all():
@@ -252,7 +254,7 @@ class RecibirCompraView(APIView):
                     MovimientoInventario.objects.create(
                         producto        = detalle.producto,
                         tienda          = dist.tienda,
-                        empleado        = request.user,
+                        empleado        = empleado_obj,
                         tipo            = "entrada",
                         cantidad        = dist.cantidad,
                         referencia_tipo = "compra",
@@ -289,7 +291,7 @@ class RecibirCompraView(APIView):
                 MovimientoInventario.objects.create(
                     producto        = detalle.producto,
                     tienda          = compra.tienda,
-                    empleado        = request.user,
+                    empleado        = empleado_obj,
                     tipo            = "entrada",
                     cantidad        = detalle.cantidad,
                     referencia_tipo = "compra",
@@ -324,7 +326,7 @@ class RecibirCompraView(APIView):
         if tienda_gasto and compra.total > 0:
             Gasto.objects.create(
                 tienda      = tienda_gasto,
-                empleado    = request.user,
+                empleado    = empleado_obj,
                 categoria   = 'proveedor',
                 descripcion = (f'Recepción {compra.numero_orden} — '
                                f'{compra.proveedor.nombre}'),
@@ -884,8 +886,11 @@ class MarcarPagadaView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def patch(self, request, pk):
-        empresa = get_empresa(request)
-        compra = Compra.objects.filter(pk=pk, proveedor__empresa=empresa).first()
+        if es_superadmin(request):
+            compra = Compra.objects.filter(pk=pk).first()
+        else:
+            empresa = get_empresa(request)
+            compra = Compra.objects.filter(pk=pk, proveedor__empresa=empresa).first()
         if not compra:
             return Response({"error": "Compra no encontrada."}, status=404)
 

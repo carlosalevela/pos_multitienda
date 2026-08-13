@@ -341,6 +341,7 @@ class CambioPOSSerializer(serializers.Serializer):
             )
 
             # ── PASO 4: DetalleVenta y descontar stock ────────────────────────
+            empleado_obj = request.user
             for d in nuevos:
                 producto = d["producto"]
                 cantidad = d["cantidad"]
@@ -362,7 +363,7 @@ class CambioPOSSerializer(serializers.Serializer):
                 MovimientoInventario.objects.create(
                     producto        = producto,
                     tienda          = tienda,
-                    empleado        = request.user,
+                    empleado        = empleado_obj,
                     tipo            = "salida",
                     cantidad        = cantidad,
                     referencia_tipo = "cambio_pos",
@@ -401,7 +402,7 @@ class CambioPOSSerializer(serializers.Serializer):
                 MovimientoInventario.objects.create(
                     producto        = producto,
                     tienda          = tienda,
-                    empleado        = request.user,
+                    empleado        = empleado_obj,
                     tipo            = "entrada",
                     cantidad        = cantidad,
                     referencia_tipo = "cambio_pos",

@@ -24,10 +24,14 @@ class _ProductoInventarioMixin:
         return cache[obj.pk]
 
     def get_maneja_mayoreo(self, obj):
-        if obj.empresa and obj.empresa.maneja_mayoreo:
-            return True
+        # Empresa debe soportar mayoreo primero (condición necesaria)
+        if not (obj.empresa and obj.empresa.maneja_mayoreo):
+            return False
+        # La tienda puede desactivarlo individualmente
         cfg = self._get_config_tienda()
-        return bool(cfg and cfg.habilitar_mayoreo)
+        if cfg is not None and not cfg.habilitar_mayoreo:
+            return False
+        return True
 
     def get_cantidad_mayoreo(self, obj):
         return obj.empresa.cantidad_mayoreo if obj.empresa else None
@@ -49,7 +53,10 @@ class _ProductoInventarioMixin:
         return cache["result"]
 
     def get_umbral_mayoreo(self, obj):
-        """Umbral efectivo: tienda (si tiene) → empresa (global)."""
+        """Umbral efectivo (misma prioridad que Producto.get_precio):
+        producto.cantidad_minima_mayoreo → tienda.umbral_mayoreo → empresa.cantidad_mayoreo"""
+        if obj.cantidad_minima_mayoreo is not None:
+            return obj.cantidad_minima_mayoreo
         cfg = self._get_config_tienda()
         if cfg and cfg.umbral_mayoreo is not None:
             return cfg.umbral_mayoreo
@@ -88,7 +95,11 @@ class ProductoSerializer(_ProductoInventarioMixin, serializers.ModelSerializer):
         return float(inv.stock_minimo) if inv else 0.0
 
     def validate_precio_mayoreo(self, value):
+        # En PATCH puede venir solo precio_mayoreo sin precio_venta:
+        # se usa el precio_venta actual del objeto como referencia.
         precio_venta = self.initial_data.get("precio_venta")
+        if precio_venta is None and self.instance:
+            precio_venta = self.instance.precio_venta
         if value is not None and precio_venta is not None:
             if float(value) > float(precio_venta):
                 raise serializers.ValidationError(

@@ -79,6 +79,7 @@ class CrearVentaView(APIView):
                 }, status=400)
 
         venta = serializer.save(empleado=request.user)
+        empleado_obj = request.user
 
         for detalle in venta.detalles.all():
             inv = Inventario.objects.select_for_update().get(
@@ -90,7 +91,7 @@ class CrearVentaView(APIView):
 
             MovimientoInventario.objects.create(
                 producto=detalle.producto, tienda_id=tienda_id,
-                empleado=request.user, tipo="salida",
+                empleado=empleado_obj, tipo="salida",
                 cantidad=detalle.cantidad, referencia_tipo="venta",
                 referencia_id=venta.id,
                 observacion=f"Venta {venta.numero_factura}",
@@ -175,7 +176,7 @@ class VentaListView(generics.ListAPIView):
         if sesion_id:    qs = qs.filter(sesion_caja_id=sesion_id)
         if fecha:        qs = qs.filter(created_at__date=fecha)
         if cliente:      qs = qs.filter(cliente_id=cliente)
-        if numero_orden: qs = qs.filter(numero_orden__icontains=numero_orden)
+        if numero_orden: qs = qs.filter(numero_factura__icontains=numero_orden)
 
         return qs.order_by("-created_at")
 
@@ -215,6 +216,7 @@ class AnularVentaView(APIView):
             return Response(
                 {"error": "Esta venta ya está anulada."}, status=400)
 
+        empleado_obj = request.user
         for detalle in venta.detalles.all():
             inv, _ = Inventario.objects.get_or_create(
                 producto=detalle.producto, tienda=venta.tienda,
@@ -225,7 +227,7 @@ class AnularVentaView(APIView):
 
             MovimientoInventario.objects.create(
                 producto=detalle.producto, tienda=venta.tienda,
-                empleado=request.user, tipo="entrada",
+                empleado=empleado_obj, tipo="entrada",
                 cantidad=detalle.cantidad, referencia_tipo="anulacion",
                 referencia_id=venta.id,
                 observacion=f"Anulación venta {venta.numero_factura}",
@@ -362,14 +364,12 @@ class AbonarCreditoView(APIView):
         # Registrar en caja para cuadre: busca la sesión abierta de la tienda
         try:
             from caja.models import SesionCaja, MovimientoCaja
-            from usuarios.models import Empleado
             tienda_id = venta.sesion_caja.tienda_id if venta.sesion_caja_id else None
             if tienda_id:
                 sesion_activa = SesionCaja.objects.filter(
                     tienda_id=tienda_id, estado="abierta"
                 ).first()
                 if sesion_activa:
-                    empleado = Empleado.objects.filter(usuario=request.user).first()
                     MovimientoCaja.objects.create(
                         sesion=sesion_activa,
                         tipo="abono_credito",
@@ -377,7 +377,7 @@ class AbonarCreditoView(APIView):
                         monto=monto,
                         descripcion=f"Abono crédito {venta.numero_factura}",
                         referencia_id=venta.id,
-                        empleado=empleado,
+                        empleado=request.user,
                     )
         except Exception:
             pass  # No bloquear el abono si falla el registro de caja

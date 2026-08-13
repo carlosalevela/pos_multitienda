@@ -384,7 +384,8 @@ class AjustarInventarioView(APIView):
 
         MovimientoInventario.objects.create(
             producto_id=producto_id, tienda_id=tienda_id,
-            empleado=request.user, tipo=tipo, cantidad=cantidad,
+            empleado=request.user,
+            tipo=tipo, cantidad=cantidad,
             referencia_tipo="manual", observacion=observacion,
         )
 
@@ -1340,7 +1341,7 @@ class TransferenciaInventarioView(APIView):
         inv_origen.save(update_fields=["stock_actual"])
         inv_destino.save(update_fields=["stock_actual"])
 
-        empleado = getattr(request.user, "empleado", None)
+        empleado = request.user
         obs = observacion or f"Transferencia a {tienda_destino.nombre}"
 
         MovimientoInventario.objects.create(

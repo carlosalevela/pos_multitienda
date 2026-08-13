@@ -19,9 +19,7 @@ from .serializers import ClienteSerializer, ClienteSimpleSerializer, SeparadoSer
 
 # ── Helper empleado ───────────────────────────────────────
 def _get_empleado(request):
-    if hasattr(request.user, "empleado"):
-        return request.user.empleado
-    return None
+    return request.user
 
 
 # ── Clientes ──────────────────────────────────────────────
@@ -554,16 +552,32 @@ class AbonosPorFechaView(APIView):
 
 
 # ── Tiers de fidelización ─────────────────────────────────
+def _get_empresa_tier(request):
+    """Para superadmin requiere ?empresa=ID; para el resto usa su empresa."""
+    if es_superadmin(request):
+        from empresas.models import Empresa
+        empresa_id = request.query_params.get("empresa") or request.data.get("empresa")
+        if not empresa_id:
+            return None
+        return Empresa.objects.filter(pk=empresa_id).first()
+    return get_empresa(request)
+
+
 class TierConfigListCreateView(generics.ListCreateAPIView):
     serializer_class   = TierConfigSerializer
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
-        empresa = get_empresa(self.request)
+        empresa = _get_empresa_tier(self.request)
+        if empresa is None:
+            return TierConfig.objects.none()
         return TierConfig.objects.filter(empresa=empresa)
 
     def perform_create(self, serializer):
-        serializer.save(empresa=get_empresa(self.request))
+        empresa = _get_empresa_tier(self.request)
+        if empresa is None:
+            raise ValidationError({"empresa": "Se requiere ?empresa=ID para superadmin."})
+        serializer.save(empresa=empresa)
 
 
 class TierConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -571,4 +585,7 @@ class TierConfigDetailView(generics.RetrieveUpdateDestroyAPIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get_queryset(self):
-        return TierConfig.objects.filter(empresa=get_empresa(self.request))
+        empresa = _get_empresa_tier(self.request)
+        if empresa is None:
+            return TierConfig.objects.none()
+        return TierConfig.objects.filter(empresa=empresa)

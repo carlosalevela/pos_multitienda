@@ -354,6 +354,8 @@ class CambioProductoView(APIView):
             return Response(
                 serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        empleado_obj = request.user
+
         devolucion = serializer.save(
             empleado=request.user,
             tienda=venta.tienda,
@@ -368,13 +370,13 @@ class CambioProductoView(APIView):
             cambio_entregado=cambio_entregado,
         )
 
-        _restaurar_stock(devolucion, request.user, venta)
+        _restaurar_stock(devolucion, empleado_obj, venta)
         inventario_reemplazo.stock_actual -= cantidad_reemplazo
         inventario_reemplazo.save(update_fields=["stock_actual"])
 
         MovimientoInventario.objects.create(
             producto=producto_reemplazo, tienda=venta.tienda,
-            empleado=request.user, tipo="salida",
+            empleado=empleado_obj, tipo="salida",
             cantidad=cantidad_reemplazo, referencia_tipo="cambio",
             referencia_id=devolucion.id,
             observacion=f"Cambio DEV-{devolucion.id} | "

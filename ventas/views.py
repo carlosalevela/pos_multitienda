@@ -31,6 +31,12 @@ class CrearVentaView(APIView):
         empresa   = get_empresa(request)
         tienda_id = request.data.get("tienda")
 
+        if not es_superadmin(request) and request.user.rol == "cajero":
+            if str(request.user.tienda_id) != str(tienda_id):
+                return Response(
+                    {"error": "No tienes permiso para vender en esta tienda."},
+                    status=403)
+
         sesion = SesionCaja.objects.filter(
             tienda_id=tienda_id,
             tienda__empresa=empresa,

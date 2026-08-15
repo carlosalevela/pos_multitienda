@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from contabilidad.models import Gasto
 from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa
 from devoluciones.models import Devolucion
-from ventas.models import Venta
+from ventas.models import PagoVenta, Venta
 
 from .models import SesionCaja
 from .serializers import (
@@ -95,10 +95,16 @@ class CerrarCajaView(APIView):
         monto_real    = serializer.validated_data["monto_final_real"]
         observaciones = serializer.validated_data.get("observaciones", "")
 
-        total_ventas = Venta.objects.filter(
-            sesion_caja=sesion, estado="completada",
-            metodo_pago__in=["efectivo", "mixto"],
+        # Efectivo de ventas normales
+        v_ef_puro = Venta.objects.filter(
+            sesion_caja=sesion, estado="completada", metodo_pago="efectivo"
         ).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        # Efectivo de ventas mixto — usar PagoVenta si existe, total completo si no (retrocompat)
+        mixto_qs_c = Venta.objects.filter(sesion_caja=sesion, estado="completada", metodo_pago="mixto")
+        mixto_ids_con_pago_c = PagoVenta.objects.filter(venta__in=mixto_qs_c).values("venta_id")
+        v_mixto_ef_c     = PagoVenta.objects.filter(venta__in=mixto_qs_c, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_mixto_legacy_c = mixto_qs_c.exclude(id__in=mixto_ids_con_pago_c).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        total_ventas     = v_ef_puro + v_mixto_ef_c + v_mixto_legacy_c
 
         total_gastos = Gasto.objects.filter(
             sesion_caja=sesion, metodo_pago="efectivo",
@@ -250,6 +256,14 @@ class ResumenCierreView(APIView):
         v_mixto         = vsum(base_v.filter(metodo_pago="mixto"))
         total_ventas    = v_efectivo + v_tarjeta + v_transferencia + v_mixto
 
+        # Porción efectivo de ventas mixto (usando PagoVenta cuando existe,
+        # contando el total completo como fallback para datos sin desglose)
+        mixto_qs = base_v.filter(metodo_pago="mixto")
+        mixto_ids_con_pago = PagoVenta.objects.filter(venta__in=mixto_qs).values("venta_id")
+        v_mixto_ef      = PagoVenta.objects.filter(venta__in=mixto_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_mixto_legacy  = mixto_qs.exclude(id__in=mixto_ids_con_pago).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        v_mixto_cash    = v_mixto_ef + v_mixto_legacy
+
         g_efectivo     = agg(base_g.filter(metodo_pago="efectivo"))
         g_otros        = agg(base_g.exclude(metodo_pago="efectivo"))
         detalle_gastos = list(base_g.values("categoria", "monto", "metodo_pago"))
@@ -268,7 +282,7 @@ class ResumenCierreView(APIView):
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
 
         monto_esperado = (
-            sesion.monto_inicial + v_efectivo + v_mixto
+            sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
             - g_efectivo - neto_dev_efectivo
         )
@@ -288,6 +302,7 @@ class ResumenCierreView(APIView):
                 "tarjeta":           float(v_tarjeta),
                 "transferencia":     float(v_transferencia),
                 "mixto":             float(v_mixto),
+                "mixto_efectivo":    float(v_mixto_cash),
                 "total":             float(total_ventas),
                 "num_transacciones": base_v.count(),
             },
@@ -298,11 +313,12 @@ class ResumenCierreView(APIView):
                 "detalle":  detalle_gastos,
             },
             "abonos": {
-                "efectivo":      float(a_efectivo),
-                "transferencia": float(a_transferencia),
-                "tarjeta":       float(a_tarjeta),
-                "total":         float(a_efectivo + a_transferencia + a_tarjeta),
-                "cantidad":      num_abonos,
+                "efectivo":         float(a_efectivo),
+                "transferencia":    float(a_transferencia),
+                "tarjeta":          float(a_tarjeta),
+                "total":            float(a_efectivo + a_transferencia + a_tarjeta),
+                "cantidad":         num_abonos,
+                "credito_efectivo": float(ac_efectivo),
             },
             "devoluciones": {
                 "efectivo":         float(dev_efectivo),

@@ -10,7 +10,7 @@ from .models import SesionCaja
 
 # ── Serializer ligero para listas (evita N+1) ─────────────────
 class SesionCajaResumenSerializer(serializers.ModelSerializer):
-    """Usado en SesionCajaListView. Los totales vienen de anotaciones en el QS."""
+    """Usado en SesionCajaListView. Totales vienen de anotaciones; desglose via SMF."""
 
     empleado_nombre = serializers.SerializerMethodField()
     tienda_nombre   = serializers.CharField(source="tienda.nombre", read_only=True)
@@ -26,6 +26,25 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     num_transacciones = serializers.IntegerField(
         source="num_transacciones_ann", read_only=True
     )
+    # Desglose ventas
+    ventas_efectivo       = serializers.SerializerMethodField()
+    ventas_tarjeta        = serializers.SerializerMethodField()
+    ventas_transferencia  = serializers.SerializerMethodField()
+    ventas_mixto          = serializers.SerializerMethodField()
+    ventas_mixto_efectivo = serializers.SerializerMethodField()
+    # Abonos separado
+    abonos_efectivo       = serializers.SerializerMethodField()
+    abonos_tarjeta        = serializers.SerializerMethodField()
+    abonos_transferencia  = serializers.SerializerMethodField()
+    abonos_total          = serializers.SerializerMethodField()
+    abonos_credito_efectivo = serializers.SerializerMethodField()
+    num_abonos            = serializers.SerializerMethodField()
+    # Devoluciones
+    devoluciones_efectivo = serializers.SerializerMethodField()
+    num_devoluciones      = serializers.SerializerMethodField()
+    num_cambios_producto  = serializers.SerializerMethodField()
+    # Cuadre
+    monto_esperado        = serializers.SerializerMethodField()
 
     class Meta:
         model  = SesionCaja
@@ -37,6 +56,12 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             "monto_final_sistema", "monto_final_real",
             "diferencia", "observaciones", "estado",
             "ventas_total", "gastos_total", "num_transacciones",
+            "ventas_efectivo", "ventas_tarjeta", "ventas_transferencia",
+            "ventas_mixto", "ventas_mixto_efectivo",
+            "abonos_efectivo", "abonos_tarjeta", "abonos_transferencia",
+            "abonos_total", "abonos_credito_efectivo", "num_abonos",
+            "devoluciones_efectivo", "num_devoluciones", "num_cambios_producto",
+            "monto_esperado",
         ]
 
     def get_empleado_nombre(self, obj):
@@ -44,9 +69,90 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
 
+    # ── helpers ───────────────────────────────────────────────
+
+    def _vsum(self, obj, metodo=None):
+        from ventas.models import Venta
+        qs = Venta.objects.filter(sesion_caja=obj, estado="completada")
+        if metodo:
+            qs = qs.filter(metodo_pago=metodo)
+        return float(qs.aggregate(t=Sum("total"))["t"] or 0)
+
+    def _asum(self, obj, tipo, metodo=None):
+        qs = obj.movimientos.filter(tipo=tipo)
+        if metodo:
+            qs = qs.filter(metodo_pago=metodo)
+        return float(qs.aggregate(t=Sum("monto"))["t"] or 0)
+
+    def _dev_neto_ef(self, obj):
+        if not hasattr(obj, "_resumen_dev_ef"):
+            from devoluciones.models import Devolucion
+            base     = Devolucion.objects.filter(venta__sesion_caja=obj, estado="procesada")
+            dev      = base.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or 0
+            cobrar   = base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0
+            devolver = base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0
+            obj._resumen_dev_ef = Decimal(str(dev + devolver - cobrar))
+        return obj._resumen_dev_ef
+
+    # ── ventas ───────────────────────────────────────────────
+
+    def get_ventas_efectivo(self, obj):       return self._vsum(obj, "efectivo")
+    def get_ventas_tarjeta(self, obj):        return self._vsum(obj, "tarjeta")
+    def get_ventas_transferencia(self, obj):  return self._vsum(obj, "transferencia")
+    def get_ventas_mixto(self, obj):          return self._vsum(obj, "mixto")
+
+    def get_ventas_mixto_efectivo(self, obj):
+        from ventas.models import PagoVenta, Venta
+        mixto_qs   = Venta.objects.filter(sesion_caja=obj, estado="completada", metodo_pago="mixto")
+        ids_con    = PagoVenta.objects.filter(venta__in=mixto_qs).values("venta_id")
+        mx_ef      = PagoVenta.objects.filter(venta__in=mixto_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        mx_legacy  = mixto_qs.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        return float(mx_ef + mx_legacy)
+
+    # ── abonos ───────────────────────────────────────────────
+
+    def get_abonos_efectivo(self, obj):      return self._asum(obj, "abono_separado", "efectivo")
+    def get_abonos_tarjeta(self, obj):       return self._asum(obj, "abono_separado", "tarjeta")
+    def get_abonos_transferencia(self, obj): return self._asum(obj, "abono_separado", "transferencia")
+    def get_abonos_total(self, obj):         return self._asum(obj, "abono_separado")
+    def get_abonos_credito_efectivo(self, obj): return self._asum(obj, "abono_credito", "efectivo")
+    def get_num_abonos(self, obj):
+        return obj.movimientos.filter(tipo="abono_separado").count()
+
+    # ── devoluciones ─────────────────────────────────────────
+
+    def get_devoluciones_efectivo(self, obj): return float(self._dev_neto_ef(obj))
+
+    def get_num_devoluciones(self, obj):
+        from devoluciones.models import Devolucion
+        return Devolucion.objects.filter(venta__sesion_caja=obj, estado="procesada").count()
+
+    def get_num_cambios_producto(self, obj):
+        from devoluciones.models import Devolucion
+        return Devolucion.objects.filter(
+            venta__sesion_caja=obj, estado="procesada",
+            tipo="cambio", producto_reemplazo__isnull=False,
+        ).count()
+
+    # ── cuadre ───────────────────────────────────────────────
+
+    def get_monto_esperado(self, obj):
+        from ventas.models import PagoVenta, Venta
+        from contabilidad.models import Gasto
+
+        def agg(qs): return qs.aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        v_ef   = Decimal(str(self.get_ventas_efectivo(obj)))
+        v_mx   = Decimal(str(self.get_ventas_mixto_efectivo(obj)))
+        g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
+        a_ef   = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
+        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
+        dev_ef = self._dev_neto_ef(obj)
+        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef - g_ef - dev_ef)
+
     @staticmethod
     def anotaciones():
-        """QuerySet annotations requeridas por este serializer."""
+        """QuerySet annotations requeridas por este serializer (solo totales bulk)."""
         _zero = Value(Decimal("0"), output_field=DecimalField())
         return {
             "ventas_total_ann": Coalesce(
@@ -214,26 +320,30 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     # ── Monto esperado ────────────────────────────────────────
 
     def get_monto_esperado(self, obj):
-        from ventas.models import Venta
+        from ventas.models import PagoVenta, Venta
         from contabilidad.models import Gasto
 
-        def vsum(qs): return qs.aggregate(t=Sum("total"))["t"] or 0
-        def agg(qs):  return qs.aggregate(t=Sum("monto"))["t"]  or 0
+        def vsum(qs): return qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        def agg(qs):  return qs.aggregate(t=Sum("monto"))["t"]  or Decimal("0")
 
-        base_v = Venta.objects.filter(sesion_caja=obj, estado="completada")
-        v_ef   = vsum(base_v.filter(metodo_pago="efectivo"))
-        v_mx   = vsum(base_v.filter(metodo_pago="mixto"))
-        g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
-        a_ef   = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
-        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
-        dev_ef = self._dev_efectivo_neto(obj)   # reutiliza el resultado cacheado
+        base_v  = Venta.objects.filter(sesion_caja=obj, estado="completada")
+        v_ef    = vsum(base_v.filter(metodo_pago="efectivo"))
+        mixto   = base_v.filter(metodo_pago="mixto")
+        ids_con = PagoVenta.objects.filter(venta__in=mixto).values("venta_id")
+        v_mx_ef = PagoVenta.objects.filter(venta__in=mixto, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_mx_lg = mixto.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        v_mx    = v_mx_ef + v_mx_lg
+        g_ef    = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
+        a_ef    = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
+        ac_ef   = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
+        dev_ef  = self._dev_efectivo_neto(obj)
         return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef - g_ef - dev_ef)
 
 
 class AbrirCajaSerializer(serializers.Serializer):
-    monto_inicial = serializers.DecimalField(max_digits=12, decimal_places=2)
+    monto_inicial = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
 
 
 class CerrarCajaSerializer(serializers.Serializer):
-    monto_final_real = serializers.DecimalField(max_digits=12, decimal_places=2)
+    monto_final_real = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0"))
     observaciones    = serializers.CharField(required=False, allow_blank=True)

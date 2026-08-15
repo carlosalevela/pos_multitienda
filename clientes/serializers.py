@@ -147,7 +147,7 @@ class SeparadoSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'total', 'abono_acumulado',
-            'saldo_pendiente', 'empleado', 'created_at',
+            'saldo_pendiente', 'estado', 'empleado', 'created_at',
         ]
 
     def get_cliente_nombre(self, obj):
@@ -181,11 +181,15 @@ class SeparadoSerializer(serializers.ModelSerializer):
         return cliente
 
     def validate(self, attrs):
-        tienda  = attrs.get('tienda')
-        cliente = attrs.get('cliente')
+        tienda   = attrs.get('tienda')
+        cliente  = attrs.get('cliente')
+        detalles = attrs.get('detalles', [])
         if tienda and cliente and tienda.empresa != cliente.empresa:
             raise serializers.ValidationError(
                 'La tienda y el cliente deben pertenecer a la misma empresa.')
+        if not detalles:
+            raise serializers.ValidationError(
+                {'detalles': 'El separado debe tener al menos un producto.'})
         return attrs
 
     def create(self, validated_data):

@@ -9,6 +9,17 @@ from core.permissions import es_superadmin, get_empresa
 from devoluciones.models import Devolucion, DetalleDevolucion
 
 
+class PagoVentaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = PagoVenta
+        fields = ["metodo", "monto"]
+
+    def validate_monto(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("El monto del pago debe ser mayor a 0.")
+        return value
+
+
 class DetalleVentaSerializer(serializers.ModelSerializer):
     producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
 
@@ -38,6 +49,7 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
 
 class VentaSerializer(serializers.ModelSerializer):
     detalles        = DetalleVentaSerializer(many=True)
+    pagos           = PagoVentaSerializer(many=True, write_only=True, required=False, default=list)
     cliente_nombre  = serializers.SerializerMethodField()
     empleado_nombre = serializers.SerializerMethodField()
     tienda_nombre   = serializers.CharField(source="tienda.nombre", read_only=True)
@@ -53,7 +65,7 @@ class VentaSerializer(serializers.ModelSerializer):
             "total", "metodo_pago", "a_credito",
             "monto_recibido", "vuelto",
             "estado", "observaciones",
-            "created_at", "detalles"
+            "created_at", "detalles", "pagos"
         ]
         read_only_fields = [
             "id", "numero_factura", "empleado",
@@ -113,6 +125,7 @@ class VentaSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         detalles_data    = validated_data.pop("detalles")
+        pagos_data       = validated_data.pop("pagos", [])
         a_credito        = validated_data.get("a_credito", False)
         metodo_pago      = validated_data.get("metodo_pago", "efectivo")
         monto_recibido   = validated_data.get("monto_recibido", Decimal("0"))
@@ -182,23 +195,15 @@ class VentaSerializer(serializers.ModelSerializer):
                 **d,
             )
 
+        for p in pagos_data:
+            PagoVenta.objects.create(venta=venta, metodo=p["metodo"], monto=p["monto"])
+
         return venta
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CAMBIO POS
 # ─────────────────────────────────────────────────────────────────────────────
-
-class PagoVentaSerializer(serializers.ModelSerializer):
-    class Meta:
-        model  = PagoVenta
-        fields = ["metodo", "monto"]
-
-    def validate_monto(self, value):
-        if value <= 0:
-            raise serializers.ValidationError("El monto del pago debe ser mayor a 0.")
-        return value
-
 
 class DetalleDevueltoSerializer(serializers.Serializer):
     producto = serializers.PrimaryKeyRelatedField(queryset=Producto.objects.all())
@@ -231,6 +236,8 @@ class CambioPOSSerializer(serializers.Serializer):
         if request and not es_superadmin(request):
             if sesion.tienda.empresa != get_empresa(request):
                 raise serializers.ValidationError("La sesión de caja no pertenece a tu empresa.")
+            if request.user.rol == "cajero" and sesion.tienda_id != request.user.tienda_id:
+                raise serializers.ValidationError("No tienes permiso para operar en esta tienda.")
         return sesion
 
     def validate_cliente(self, cliente):
@@ -356,7 +363,7 @@ class CambioPOSSerializer(serializers.Serializer):
                     subtotal        = (d["precio_unitario"] - d.get("descuento", Decimal("0"))) * cantidad,
                 )
 
-                inv = Inventario.objects.get(producto=producto, tienda=tienda)
+                inv = Inventario.objects.select_for_update().get(producto=producto, tienda=tienda)
                 inv.stock_actual -= cantidad
                 inv.save(update_fields=["stock_actual"])
 
@@ -395,7 +402,7 @@ class CambioPOSSerializer(serializers.Serializer):
                     subtotal        = producto.precio_venta * cantidad,
                 )
 
-                inv = Inventario.objects.get(producto=producto, tienda=tienda)
+                inv = Inventario.objects.select_for_update().get(producto=producto, tienda=tienda)
                 inv.stock_actual += cantidad
                 inv.save(update_fields=["stock_actual"])
 

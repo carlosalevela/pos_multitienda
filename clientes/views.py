@@ -1,8 +1,8 @@
 from datetime import timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics
 from rest_framework.exceptions import ValidationError
@@ -133,23 +133,68 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
+        tienda   = serializer.validated_data['tienda']
+        detalles = serializer.validated_data['detalles']
+
+        # ── Validar y reservar stock ───────────────────────
+        inv_reservas = []
+        for det in detalles:
+            try:
+                inv = Inventario.objects.select_for_update().get(
+                    producto=det['producto'], tienda=tienda)
+            except Inventario.DoesNotExist:
+                raise ValidationError({
+                    "error": (
+                        f"'{det['producto'].nombre}' no tiene inventario "
+                        f"registrado en esta tienda."
+                    )
+                })
+            if inv.stock_actual < det['cantidad']:
+                raise ValidationError({
+                    "error": (
+                        f"Stock insuficiente para '{det['producto'].nombre}'. "
+                        f"Disponible: {inv.stock_actual}, solicitado: {det['cantidad']}."
+                    )
+                })
+            inv_reservas.append((inv, det))
+
         separado = serializer.save(empleado=_get_empleado(request))
+
+        # ── Decrementar stock (reserva física) ────────────
+        for inv, det in inv_reservas:
+            inv.stock_actual -= det['cantidad']
+            inv.save(update_fields=['stock_actual'])
+            MovimientoInventario.objects.create(
+                producto        = det['producto'],
+                tienda          = tienda,
+                empleado        = _get_empleado(request),
+                tipo            = 'salida',
+                cantidad        = det['cantidad'],
+                referencia_tipo = 'separado',
+                referencia_id   = separado.id,
+                observacion     = (
+                    f"Separado #{separado.id} — "
+                    f"{separado.cliente.nombre} {separado.cliente.apellido}"
+                ),
+            )
 
         # ── Abono inicial opcional ────────────────────────
         abono_inicial = request.data.get('abono_inicial')
         metodo_pago   = request.data.get('metodo_pago', 'efectivo')
-
-        en_caja = False
+        en_caja       = False
 
         if abono_inicial:
-            monto = Decimal(str(abono_inicial))
+            try:
+                monto = Decimal(str(abono_inicial))
+            except InvalidOperation:
+                raise ValidationError(
+                    {"abono_inicial": "El monto del abono inicial no es válido."})
 
             if monto > 0:
                 if monto > separado.saldo_pendiente:
                     raise ValidationError(
                         {"abono_inicial": "El abono inicial no puede "
-                                          "superar el total del separado."}
-                    )
+                                          "superar el total del separado."})
 
                 AbonoSeparado.objects.create(
                     separado    = separado,
@@ -167,12 +212,8 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
                 separado.save()
 
-                # ── Registrar en caja si hay sesión abierta ──
                 sesion = SesionCaja.objects.filter(
-                    tienda_id = separado.tienda_id,
-                    estado    = 'abierta',
-                ).first()
-
+                    tienda_id=separado.tienda_id, estado='abierta').first()
                 if sesion:
                     MovimientoCaja.objects.create(
                         sesion        = sesion,
@@ -191,10 +232,7 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
 
         headers = self.get_success_headers(serializer.data)
         return Response(
-            {
-                **serializer.data,
-                "en_caja": en_caja,
-            },
+            {**serializer.data, "en_caja": en_caja},
             status=201,
             headers=headers,
         )
@@ -233,12 +271,13 @@ class AbonarSeparadoView(APIView):
                 {"error": f"Este separado está {separado.estado}."},
                 status=400)
 
-        monto = request.data.get("monto")
-        if not monto or float(monto) <= 0:
-            return Response(
-                {"error": "El monto debe ser mayor a 0."}, status=400)
-
-        monto       = Decimal(str(monto))
+        monto_raw = request.data.get("monto")
+        try:
+            monto = Decimal(str(monto_raw))
+        except (InvalidOperation, TypeError):
+            return Response({"error": "El monto debe ser un número válido."}, status=400)
+        if monto <= 0:
+            return Response({"error": "El monto debe ser mayor a 0."}, status=400)
         metodo_pago = request.data.get("metodo_pago", "efectivo")
 
         if monto > separado.saldo_pendiente:
@@ -303,7 +342,8 @@ class CancelarSeparadoView(APIView):
             filtro = {"pk": pk}
             if not es_superadmin(request):
                 filtro["tienda__empresa"] = get_empresa(request)
-            separado = Separado.objects.prefetch_related(
+            # select_for_update en el separado para evitar doble cancelación concurrente
+            separado = Separado.objects.select_for_update().prefetch_related(
                 "detalles__producto"
             ).get(**filtro)
         except Separado.DoesNotExist:
@@ -319,18 +359,15 @@ class CancelarSeparadoView(APIView):
                 {"error": "Este separado ya está cancelado."},
                 status=400)
 
+        # Restaurar stock reservado al crear el separado
         for detalle in separado.detalles.all():
             inv, _ = Inventario.objects.select_for_update().get_or_create(
                 producto = detalle.producto,
                 tienda   = separado.tienda,
-                defaults = {
-                    "stock_actual": 0,
-                    "stock_minimo": 0,
-                    "stock_maximo": 0,
-                }
+                defaults = {"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0},
             )
             inv.stock_actual += detalle.cantidad
-            inv.save()
+            inv.save(update_fields=["stock_actual"])
 
             MovimientoInventario.objects.create(
                 producto        = detalle.producto,
@@ -343,25 +380,31 @@ class CancelarSeparadoView(APIView):
                 observacion     = f"Cancelación separado #{separado.id}",
             )
 
+        # Registrar reversión en caja por método de pago real (no hardcoded)
         if separado.abono_acumulado > 0:
             sesion = SesionCaja.objects.filter(
-                tienda_id=separado.tienda_id,
-                estado="abierta",
-            ).first()
+                tienda_id=separado.tienda_id, estado="abierta").first()
             if sesion:
-                MovimientoCaja.objects.create(
-                    sesion        = sesion,
-                    tipo          = "cancelacion_separado",
-                    metodo_pago   = "efectivo",
-                    monto         = separado.abono_acumulado,
-                    referencia_id = separado.id,
-                    empleado      = _get_empleado(request),
-                    descripcion   = (
-                        f"Reversión separado #{separado.id} - "
-                        f"{separado.cliente.nombre} "
-                        f"{separado.cliente.apellido}"
-                    ),
+                abonos_por_metodo = (
+                    AbonoSeparado.objects
+                    .filter(separado=separado)
+                    .values("metodo_pago")
+                    .annotate(total=Sum("monto"))
                 )
+                for row in abonos_por_metodo:
+                    MovimientoCaja.objects.create(
+                        sesion        = sesion,
+                        tipo          = "cancelacion_separado",
+                        metodo_pago   = row["metodo_pago"],
+                        monto         = row["total"],
+                        referencia_id = separado.id,
+                        empleado      = _get_empleado(request),
+                        descripcion   = (
+                            f"Reversión separado #{separado.id} - "
+                            f"{separado.cliente.nombre} "
+                            f"{separado.cliente.apellido}"
+                        ),
+                    )
 
         separado.estado = "cancelado"
         separado.save()
@@ -369,10 +412,7 @@ class CancelarSeparadoView(APIView):
         return Response({
             "detail": f"Separado #{separado.id} cancelado. Stock restaurado.",
             "productos_restaurados": [
-                {
-                    "producto": d.producto.nombre,
-                    "cantidad": float(d.cantidad),
-                }
+                {"producto": d.producto.nombre, "cantidad": float(d.cantidad)}
                 for d in separado.detalles.all()
             ],
         })
@@ -399,7 +439,8 @@ class ClienteResumenView(APIView):
         separados_qs = Separado.objects.filter(cliente=cliente)
         activos      = separados_qs.filter(estado="activo")
 
-        deuda_total = sum(s.saldo_pendiente for s in activos)
+        deuda_total = activos.aggregate(
+            t=Sum("saldo_pendiente"))["t"] or Decimal("0")
 
         ultimo = separados_qs.order_by("-created_at").first()
 

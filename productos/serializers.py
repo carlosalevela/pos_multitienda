@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from rest_framework import serializers
 from .models import Categoria, Producto, Inventario, MovimientoInventario
 
@@ -177,7 +179,7 @@ class InventarioSerializer(serializers.ModelSerializer):
 
 class AjusteInventarioSerializer(serializers.Serializer):
     tipo        = serializers.ChoiceField(choices=["entrada", "salida", "ajuste"])
-    cantidad    = serializers.DecimalField(max_digits=12, decimal_places=2)
+    cantidad    = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     observacion = serializers.CharField(required=False, allow_blank=True)
 
 

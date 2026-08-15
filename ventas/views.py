@@ -106,6 +106,10 @@ class CrearVentaView(APIView):
         tier_feedback = None
         if venta.cliente_id:
             from clientes.models import Cliente, TierConfig
+            from django.db.models import F
+            Cliente.objects.filter(pk=venta.cliente_id).update(
+                total_acumulado=F('total_acumulado') + venta.total
+            )
             cli = Cliente.objects.get(pk=venta.cliente_id)
             total_acum = float(cli.total_acumulado)
             tier = cli.tier_actual
@@ -212,7 +216,7 @@ class AnularVentaView(APIView):
     @transaction.atomic
     def post(self, request, pk):
         try:
-            qs    = Venta.objects.prefetch_related("detalles__producto")
+            qs    = Venta.objects.select_for_update()
             venta = qs.get(pk=pk) if es_superadmin(request) \
                 else qs.get(pk=pk, tienda__empresa=get_empresa(request))
         except Venta.DoesNotExist:
@@ -223,13 +227,15 @@ class AnularVentaView(APIView):
                 {"error": "Esta venta ya está anulada."}, status=400)
 
         empleado_obj = request.user
-        for detalle in venta.detalles.all():
-            inv, _ = Inventario.objects.get_or_create(
+        for detalle in venta.detalles.select_related("producto"):
+            Inventario.objects.get_or_create(
                 producto=detalle.producto, tienda=venta.tienda,
                 defaults={"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0}
             )
+            inv = Inventario.objects.select_for_update().get(
+                producto=detalle.producto, tienda=venta.tienda)
             inv.stock_actual += detalle.cantidad
-            inv.save()
+            inv.save(update_fields=["stock_actual"])
 
             MovimientoInventario.objects.create(
                 producto=detalle.producto, tienda=venta.tienda,
@@ -340,10 +346,17 @@ class AbonarCreditoView(APIView):
         from .models import PagoVenta
         empresa = get_empresa(request)
         try:
-            venta = Venta.objects.prefetch_related('pagos').get(
+            venta = Venta.objects.select_for_update().get(
                 pk=pk, empresa=empresa, a_credito=True)
         except Venta.DoesNotExist:
             return Response({'error': 'Venta a crédito no encontrada.'}, status=404)
+
+        if (not es_superadmin(request) and
+                request.user.rol == 'cajero' and
+                venta.tienda_id != request.user.tienda_id):
+            return Response(
+                {'error': 'No tienes permiso para abonar en esta tienda.'},
+                status=403)
 
         if venta.estado == 'anulada':
             return Response({'error': 'La venta está anulada.'}, status=400)
@@ -376,15 +389,16 @@ class AbonarCreditoView(APIView):
                     tienda_id=tienda_id, estado="abierta"
                 ).first()
                 if sesion_activa:
-                    MovimientoCaja.objects.create(
-                        sesion=sesion_activa,
-                        tipo="abono_credito",
-                        metodo_pago=metodo,
-                        monto=monto,
-                        descripcion=f"Abono crédito {venta.numero_factura}",
-                        referencia_id=venta.id,
-                        empleado=request.user,
-                    )
+                    with transaction.atomic():  # savepoint — fallo aquí no revierte el PagoVenta
+                        MovimientoCaja.objects.create(
+                            sesion=sesion_activa,
+                            tipo="abono_credito",
+                            metodo_pago=metodo,
+                            monto=monto,
+                            descripcion=f"Abono crédito {venta.numero_factura}",
+                            referencia_id=venta.id,
+                            empleado=request.user,
+                        )
         except Exception:
             pass  # No bloquear el abono si falla el registro de caja
 

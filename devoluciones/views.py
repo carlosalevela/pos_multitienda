@@ -23,19 +23,21 @@ def _es_otra_tienda(user, tienda_id) -> bool:
 
 def _restaurar_stock(devolucion: Devolucion, empleado, venta) -> None:
     for detalle in devolucion.detalles.select_related("producto"):
-        inv = Inventario.objects.select_for_update().filter(
+        # Asegurar que la fila existe antes de lockear (evita IntegrityError en concurrent creates)
+        Inventario.objects.get_or_create(
             producto=detalle.producto,
             tienda=devolucion.tienda,
-        ).first()
-        if not inv:
-            inv = Inventario.objects.create(
-                producto=detalle.producto,
-                tienda=devolucion.tienda,
-                stock_actual=Decimal("0"),
-                stock_averias=Decimal("0"),
-                stock_minimo=Decimal("0"),
-                stock_maximo=Decimal("0"),
-            )
+            defaults={
+                "stock_actual":  Decimal("0"),
+                "stock_averias": Decimal("0"),
+                "stock_minimo":  Decimal("0"),
+                "stock_maximo":  Decimal("0"),
+            },
+        )
+        inv = Inventario.objects.select_for_update().get(
+            producto=detalle.producto,
+            tienda=devolucion.tienda,
+        )
         inv.stock_averias += detalle.cantidad
         inv.save(update_fields=["stock_averias"])
         MovimientoInventario.objects.create(
@@ -96,7 +98,7 @@ class CrearDevolucionView(APIView):
     def post(self, request):
         venta_id = request.data.get("venta")
         try:
-            qs    = Venta.objects.prefetch_related("detalles")
+            qs    = Venta.objects.select_for_update()
             venta = qs.get(pk=venta_id) if es_superadmin(request) \
                 else qs.get(pk=venta_id,
                             tienda__empresa=get_empresa(request))
@@ -194,7 +196,7 @@ class CambioProductoView(APIView):
     def post(self, request):
         venta_id = request.data.get("venta")
         try:
-            qs    = Venta.objects.prefetch_related("detalles")
+            qs    = Venta.objects.select_for_update()
             venta = qs.get(pk=venta_id) if es_superadmin(request) \
                 else qs.get(pk=venta_id,
                             tienda__empresa=get_empresa(request))

@@ -72,8 +72,10 @@ class DevolucionSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "empleado", "tienda",
             "total_devuelto", "estado", "created_at",
-            "precio_reemplazo",
-            "subtotal_reemplazo",
+            "precio_reemplazo", "subtotal_reemplazo",
+            "diferencia", "total_reemplazo",
+            "tipo_diferencia", "metodo_pago_diferencia",
+            "monto_recibido", "cambio_entregado",
         ]
 
     def get_empleado_nombre(self, obj):

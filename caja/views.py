@@ -112,11 +112,13 @@ class CerrarCajaView(APIView):
 
         base_a  = sesion.movimientos.filter(tipo="abono_separado")
         base_ac = sesion.movimientos.filter(tipo="abono_credito")
+        base_cs = sesion.movimientos.filter(tipo="cancelacion_separado")
         abonos_efectivo      = base_a.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_tarjeta       = base_a.filter(metodo_pago="tarjeta").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_transferencia = base_a.filter(metodo_pago="transferencia").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_total         = abonos_efectivo + abonos_tarjeta + abonos_transferencia
         credito_efectivo     = base_ac.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        cancelaciones_efectivo = base_cs.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
         base_d = Devolucion.objects.filter(venta__sesion_caja=sesion, estado="procesada")
         dev_efectivo     = base_d.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
@@ -128,6 +130,7 @@ class CerrarCajaView(APIView):
             sesion.monto_inicial + total_ventas
             + abonos_efectivo + credito_efectivo
             - total_gastos - neto_dev_efectivo
+            - cancelaciones_efectivo
         )
         diferencia = monto_real - monto_sistema
 
@@ -145,11 +148,12 @@ class CerrarCajaView(APIView):
             "monto_inicial":        float(sesion.monto_inicial),
             "total_ventas":         float(total_ventas),
             "total_gastos":         float(total_gastos),
-            "abonos_efectivo":      float(abonos_efectivo),
-            "abonos_tarjeta":       float(abonos_tarjeta),
-            "abonos_transferencia": float(abonos_transferencia),
-            "abonos_total":         float(abonos_total),
-            "total_devoluciones":   float(neto_dev_efectivo),
+            "abonos_efectivo":         float(abonos_efectivo),
+            "abonos_tarjeta":          float(abonos_tarjeta),
+            "abonos_transferencia":    float(abonos_transferencia),
+            "abonos_total":            float(abonos_total),
+            "cancelaciones_efectivo":  float(cancelaciones_efectivo),
+            "total_devoluciones":      float(neto_dev_efectivo),
             "monto_final_sistema":  float(monto_sistema),
             "monto_final_real":     float(monto_real),
             "diferencia":           float(diferencia),
@@ -275,6 +279,8 @@ class ResumenCierreView(APIView):
         num_abonos      = base_a.count()
         base_ac         = sesion.movimientos.filter(tipo="abono_credito")
         ac_efectivo     = agg(base_ac.filter(metodo_pago="efectivo"))
+        base_cs         = sesion.movimientos.filter(tipo="cancelacion_separado")
+        cs_efectivo     = agg(base_cs.filter(metodo_pago="efectivo"))
 
         dev_efectivo     = dsum(base_d.filter(tipo="devolucion", metodo_devolucion="efectivo"))
         cambios_cobrar   = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo"))
@@ -285,6 +291,7 @@ class ResumenCierreView(APIView):
             sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
             - g_efectivo - neto_dev_efectivo
+            - cs_efectivo
         )
 
         nombre = (
@@ -313,12 +320,13 @@ class ResumenCierreView(APIView):
                 "detalle":  detalle_gastos,
             },
             "abonos": {
-                "efectivo":         float(a_efectivo),
-                "transferencia":    float(a_transferencia),
-                "tarjeta":          float(a_tarjeta),
-                "total":            float(a_efectivo + a_transferencia + a_tarjeta),
-                "cantidad":         num_abonos,
-                "credito_efectivo": float(ac_efectivo),
+                "efectivo":              float(a_efectivo),
+                "transferencia":         float(a_transferencia),
+                "tarjeta":               float(a_tarjeta),
+                "total":                 float(a_efectivo + a_transferencia + a_tarjeta),
+                "cantidad":              num_abonos,
+                "credito_efectivo":      float(ac_efectivo),
+                "cancelaciones_efectivo": float(cs_efectivo),
             },
             "devoluciones": {
                 "efectivo":         float(dev_efectivo),

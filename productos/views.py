@@ -823,7 +823,7 @@ class RecuperarAveriaView(APIView):
         MovimientoInventario.objects.create(
             producto_id=producto_id, tienda_id=tienda_id,
             empleado=request.user,
-            tipo="entrada" if accion == "recuperar" else "salida",
+            tipo="entrada" if accion == "recuperar" else "dano",
             cantidad=cantidad,
             referencia_tipo=(
                 "recuperacion_averia" if accion == "recuperar"
@@ -1307,33 +1307,42 @@ class TransferenciaInventarioView(APIView):
         if cantidad <= 0:
             return Response({"error": "La cantidad debe ser mayor a cero."}, status=400)
 
+        empresa = get_empresa(request)
         try:
-            producto = Producto.objects.get(pk=producto_id)
+            qs_prod  = Producto.objects if not empresa else Producto.objects.filter(empresa=empresa)
+            producto = qs_prod.get(pk=producto_id)
         except Producto.DoesNotExist:
             return Response({"error": "Producto no encontrado."}, status=404)
 
-        from tiendas.models import Tienda
         try:
-            tienda_origen  = Tienda.objects.get(pk=tienda_origen_id)
-            tienda_destino = Tienda.objects.get(pk=tienda_destino_id)
+            qs_tienda      = Tienda.objects if not empresa else Tienda.objects.filter(empresa=empresa)
+            tienda_origen  = qs_tienda.get(pk=tienda_origen_id)
+            tienda_destino = qs_tienda.get(pk=tienda_destino_id)
         except Tienda.DoesNotExist:
             return Response({"error": "Tienda no encontrada."}, status=404)
 
-        # Stock de origen (with lock for atomicity)
-        inv_origen, _ = Inventario.objects.select_for_update().get_or_create(
-            producto=producto, tienda=tienda_origen,
-            defaults={"stock_actual": 0},
-        )
+        # Asegurar filas en inventario antes de lockear (get_or_create maneja race)
+        Inventario.objects.get_or_create(
+            producto=producto, tienda=tienda_origen, defaults={"stock_actual": 0})
+        Inventario.objects.get_or_create(
+            producto=producto, tienda=tienda_destino, defaults={"stock_actual": 0})
+
+        # Lockear en orden ascendente por tienda_id para evitar deadlock
+        inventarios = {
+            inv.tienda_id: inv
+            for inv in Inventario.objects.select_for_update().filter(
+                producto=producto,
+                tienda_id__in=[tienda_origen.id, tienda_destino.id],
+            ).order_by("tienda_id")
+        }
+        inv_origen  = inventarios[tienda_origen.id]
+        inv_destino = inventarios[tienda_destino.id]
+
         if inv_origen.stock_actual < cantidad:
             return Response({
                 "error": f"Stock insuficiente en {tienda_origen.nombre}. "
                          f"Disponible: {inv_origen.stock_actual}."
             }, status=400)
-
-        inv_destino, _ = Inventario.objects.select_for_update().get_or_create(
-            producto=producto, tienda=tienda_destino,
-            defaults={"stock_actual": 0},
-        )
 
         # Mover stock
         inv_origen.stock_actual  -= cantidad

@@ -513,13 +513,17 @@ class CreditosClienteView(APIView):
 
     def get(self, request, pk):
         from ventas.models import Venta
-        empresa  = get_empresa(request)
-        cliente  = Cliente.objects.filter(pk=pk, empresa=empresa).first()
+        empresa = get_empresa(request)
+        if empresa:
+            cliente = Cliente.objects.filter(pk=pk, empresa=empresa).first()
+        else:
+            cliente = Cliente.objects.filter(pk=pk).first()
         if not cliente:
             return Response({'error': 'Cliente no encontrado.'}, status=404)
 
+        filtro_empresa = {'empresa': empresa} if empresa else {}
         ventas_qs = Venta.objects.filter(
-            cliente=cliente, a_credito=True, estado='completada', empresa=empresa
+            cliente=cliente, a_credito=True, estado='completada', **filtro_empresa
         ).prefetch_related('pagos').order_by('-created_at')
 
         ventas_data = []

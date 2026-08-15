@@ -43,6 +43,12 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
         precio    = attrs["precio_unitario"]
         cantidad  = attrs["cantidad"]
         descuento = attrs.get("descuento", Decimal("0"))
+        if descuento < Decimal("0"):
+            raise serializers.ValidationError(
+                {"descuento": "El descuento no puede ser negativo."})
+        if descuento > precio:
+            raise serializers.ValidationError(
+                {"descuento": "El descuento no puede superar el precio unitario."})
         attrs["subtotal"] = (precio - descuento) * cantidad
         return attrs
 
@@ -151,8 +157,12 @@ class VentaSerializer(serializers.ModelSerializer):
             # multiplicación por JOIN (annotate + aggregate sobre el mismo join
             # puede inflar Sum("total") si hay múltiples pagos por venta).
             cliente = validated_data["cliente"]
+            from clientes.models import Cliente as ClienteModel
             from django.db.models import Sum
             from .models import PagoVenta
+            # Lock en el cliente para serializar validaciones de crédito concurrentes
+            cliente = ClienteModel.objects.select_for_update().get(pk=cliente.pk)
+            validated_data["cliente"] = cliente
             base = dict(cliente=cliente, a_credito=True, estado="completada")
             total_vendido = Venta.objects.filter(**base).aggregate(
                 t=Sum("total"))["t"] or Decimal("0")
@@ -171,6 +181,9 @@ class VentaSerializer(serializers.ModelSerializer):
             validated_data["monto_recibido"] = Decimal("0")
             vuelto = Decimal("0")
         else:
+            if metodo_pago == "efectivo" and monto_recibido < total:
+                raise serializers.ValidationError(
+                    {"monto_recibido": "El monto recibido no cubre el total de la venta."})
             vuelto = monto_recibido - total if metodo_pago == "efectivo" else Decimal("0")
 
         empresa = get_empresa(self.context["request"])
@@ -363,7 +376,16 @@ class CambioPOSSerializer(serializers.Serializer):
                     subtotal        = (d["precio_unitario"] - d.get("descuento", Decimal("0"))) * cantidad,
                 )
 
-                inv = Inventario.objects.select_for_update().get(producto=producto, tienda=tienda)
+                try:
+                    inv = Inventario.objects.select_for_update().get(
+                        producto=producto, tienda=tienda)
+                except Inventario.DoesNotExist:
+                    raise serializers.ValidationError(
+                        f"El producto '{producto.nombre}' no tiene inventario en esta tienda.")
+                if inv.stock_actual < cantidad:
+                    raise serializers.ValidationError(
+                        f"Stock insuficiente para '{producto.nombre}'. "
+                        f"Disponible: {inv.stock_actual}, solicitado: {cantidad}.")
                 inv.stock_actual -= cantidad
                 inv.save(update_fields=["stock_actual"])
 
@@ -385,7 +407,7 @@ class CambioPOSSerializer(serializers.Serializer):
                 empleado          = request.user,
                 tipo              = "cambio",
                 total_devuelto    = total_devuelto,
-                metodo_devolucion = "efectivo",
+                metodo_devolucion = "nota_credito",
                 observaciones     = observaciones,
             )
 
@@ -402,19 +424,29 @@ class CambioPOSSerializer(serializers.Serializer):
                     subtotal        = producto.precio_venta * cantidad,
                 )
 
-                inv = Inventario.objects.select_for_update().get(producto=producto, tienda=tienda)
-                inv.stock_actual += cantidad
-                inv.save(update_fields=["stock_actual"])
+                Inventario.objects.get_or_create(
+                    producto=producto, tienda=tienda,
+                    defaults={
+                        "stock_actual":  Decimal("0"),
+                        "stock_averias": Decimal("0"),
+                        "stock_minimo":  Decimal("0"),
+                        "stock_maximo":  Decimal("0"),
+                    },
+                )
+                inv = Inventario.objects.select_for_update().get(
+                    producto=producto, tienda=tienda)
+                inv.stock_averias += cantidad
+                inv.save(update_fields=["stock_averias"])
 
                 MovimientoInventario.objects.create(
                     producto        = producto,
                     tienda          = tienda,
                     empleado        = empleado_obj,
-                    tipo            = "entrada",
+                    tipo            = "dano",
                     cantidad        = cantidad,
                     referencia_tipo = "cambio_pos",
                     referencia_id   = devolucion.id,
-                    observacion     = "Reposición por cambio POS",
+                    observacion     = "Avería por cambio POS",
                 )
 
             # ── PASO 7: PagoVenta ─────────────────────────────────────────────

@@ -33,11 +33,12 @@ class SesionCaja(models.Model):
 # ✅ NUEVO
 class MovimientoCaja(models.Model):
     TIPO_CHOICES = [
-        ("venta",           "Venta"),
-        ("abono_separado",  "Abono separado"),
-        ("abono_credito",   "Abono crédito"),
-        ("gasto",           "Gasto"),
-        ("ingreso_manual",  "Ingreso manual"),
+        ("venta",                "Venta"),
+        ("abono_separado",       "Abono separado"),
+        ("abono_credito",        "Abono crédito"),
+        ("cancelacion_separado", "Cancelación separado"),
+        ("gasto",                "Gasto"),
+        ("ingreso_manual",       "Ingreso manual"),
     ]
     METODO_CHOICES = [
         ("efectivo",      "Efectivo"),

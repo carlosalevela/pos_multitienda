@@ -844,6 +844,13 @@ class RecuperarAveriaView(APIView):
         })
 
 
+def _xlsx_safe(val):
+    """Evita formula injection en xlsx: prefija apostrofe a strings que empiezan con =+-@."""
+    if isinstance(val, str) and val and val[0] in ('=', '+', '-', '@'):
+        return "'" + val
+    return val
+
+
 # ── Exportar inventario a Excel ───────────────────────────
 class ExportarInventarioView(APIView):
     permission_classes = [EsAdminOSupervisor]
@@ -874,7 +881,7 @@ class ExportarInventarioView(APIView):
         elif alerta == "agotado":
             qs = qs.filter(stock_actual__lte=0)
 
-        inventarios = list(qs.order_by("tienda__nombre", "producto__nombre"))
+        inventarios = list(qs.order_by("tienda__nombre", "producto__nombre")[:5000])
 
         if not es_superadmin(request):
             empresa_nombre = get_empresa(request).nombre
@@ -1025,7 +1032,7 @@ class ExportarInventarioView(APIView):
             ]
 
             for col_idx, (valor_celda, alin, fuente, fmt) in enumerate(celdas, start=1):
-                c = ws.cell(row=fila, column=col_idx, value=valor_celda)
+                c = ws.cell(row=fila, column=col_idx, value=_xlsx_safe(valor_celda))
                 c.font   = fuente
                 c.border = border()
                 c.alignment = (
@@ -1140,7 +1147,7 @@ class ExportarInventarioView(APIView):
                 (perdida,                          "right",  f_rojo,    "#,##0.00"),
             ]
             for col_idx, (val_c, alin, fuente, fmt) in enumerate(celdas2, start=1):
-                c = ws2.cell(row=fila2, column=col_idx, value=val_c)
+                c = ws2.cell(row=fila2, column=col_idx, value=_xlsx_safe(val_c))
                 c.font      = fuente
                 c.border    = border()
                 c.alignment = (

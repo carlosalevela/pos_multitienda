@@ -8,6 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from rest_framework import generics
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -34,6 +35,21 @@ MESES = [
     "", "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ]
+
+
+def _validar_rango(fecha_ini, fecha_fin):
+    """Returns 400 Response if fechas are invalid or inverted, else None."""
+    from datetime import date as _date
+    try:
+        fi = _date.fromisoformat(str(fecha_ini))
+        ff = _date.fromisoformat(str(fecha_fin))
+    except (ValueError, TypeError):
+        return Response({"error": "Fechas inválidas. Usa formato YYYY-MM-DD."}, status=400)
+    if fi > ff:
+        return Response(
+            {"error": "fecha_ini no puede ser posterior a fecha_fin."}, status=400
+        )
+    return None
 
 
 def _cajas_abiertas(request, tienda_id, fecha_fin):
@@ -116,8 +132,13 @@ class GastoListCreateView(generics.ListCreateAPIView):
         return context
 
     def perform_create(self, serializer):
+        user      = self.request.user
         tienda_id = self.request.data.get("tienda")
         empresa   = None if es_superadmin(self.request) else get_empresa(self.request)
+
+        if not es_superadmin(self.request) and user.rol == 'cajero':
+            if str(user.tienda_id) != str(tienda_id):
+                raise PermissionDenied("Solo puedes registrar gastos en tu tienda.")
 
         sesion_filtro = {"tienda_id": tienda_id, "estado": "abierta"}
         if empresa:
@@ -148,8 +169,17 @@ class GastoDetailView(generics.RetrieveDestroyAPIView):
 
     def get_queryset(self):
         if es_superadmin(self.request):
-            return Gasto.objects.all()
-        return Gasto.objects.filter(tienda__empresa=get_empresa(self.request))
+            return Gasto.objects.select_related("sesion_caja").all()
+        return Gasto.objects.select_related("sesion_caja").filter(
+            tienda__empresa=get_empresa(self.request)
+        )
+
+    def perform_destroy(self, instance):
+        if instance.sesion_caja and instance.sesion_caja.estado == 'cerrada':
+            raise ValidationError(
+                "No se puede eliminar un gasto de una sesión ya cerrada."
+            )
+        instance.delete()
 
 
 # ── Resumen diario ────────────────────────────────────────────
@@ -396,6 +426,9 @@ class GastosResumenRangoView(APIView):
 
         if not fecha_ini or not fecha_fin:
             return Response({"error": "fecha_ini y fecha_fin son requeridos"}, status=400)
+        err = _validar_rango(fecha_ini, fecha_fin)
+        if err:
+            return err
 
         qs = Gasto.objects.filter(created_at__date__gte=fecha_ini, created_at__date__lte=fecha_fin)
         qs = scope_qs(request, qs, tienda_id=tienda_id)
@@ -444,6 +477,10 @@ class EstadoResultadosView(APIView):
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
+
+        err = _validar_rango(fecha_ini, fecha_fin)
+        if err:
+            return err
 
         # ── Querysets base ────────────────────────────────────
         ventas_qs = Venta.objects.filter(
@@ -905,6 +942,10 @@ class FlujoCajaView(APIView):
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
 
+        err = _validar_rango(fecha_ini, fecha_fin)
+        if err:
+            return err
+
         sesiones_qs = SesionCaja.objects.filter(
             fecha_apertura__date__gte=fecha_ini,
             fecha_apertura__date__lte=fecha_fin,
@@ -1094,6 +1135,13 @@ class TopClientesView(APIView):
 
 
 # ── Exportación a Excel ───────────────────────────────────────
+def _xlsx_safe(val):
+    """Evita formula injection en xlsx: prefija apostrofe a strings que empiezan con =+-@."""
+    if isinstance(val, str) and val and val[0] in ('=', '+', '-', '@'):
+        return "'" + val
+    return val
+
+
 # Helpers de estilo
 _NAVY    = "1E3A5F"
 _BLUE    = "2E6DA4"
@@ -1105,7 +1153,7 @@ _FMT_PCT = '0.00%'
 
 
 def _hdr(ws, row, col, value, bold=True, bg=None, color="FFFFFF", size=11, fmt=None):
-    cell = ws.cell(row=row, column=col, value=value)
+    cell = ws.cell(row=row, column=col, value=_xlsx_safe(value))
     cell.font = Font(bold=bold, color=color, size=size)
     if bg:
         cell.fill = PatternFill("solid", fgColor=bg)
@@ -1255,7 +1303,7 @@ def _build_flujo_caja_sheet(ws, data):
             s["estado"],
         ]
         for c_idx, val in enumerate(row_vals, 1):
-            cell = ws.cell(row=r, column=c_idx, value=val)
+            cell = ws.cell(row=r, column=c_idx, value=_xlsx_safe(val) if isinstance(val, str) else val)
             if c_idx >= 4 and isinstance(val, (int, float)) and val is not None:
                 cell.number_format = _FMT_CUR
                 cell.alignment = Alignment(horizontal="right")
@@ -1269,10 +1317,12 @@ def _build_flujo_caja_sheet(ws, data):
     res = data["resumen"]
     ws.merge_cells(f"A{r}:C{r}")
     _hdr(ws, r, 1, "TOTALES", bold=True, bg=_GRAY)
+    total_gastos_col  = round(sum(s["salidas"]["gastos"]       for s in data["sesiones"]), 2)
+    total_devol_col   = round(sum(s["salidas"]["devoluciones"] for s in data["sesiones"]), 2)
     totales = [
         None, None, None, None,
         None, None, None, None, None,
-        -res["total_salidas"], None,
+        -total_gastos_col, -total_devol_col,
         res["flujo_neto"],
         None, None, res["total_diferencias"], None,
     ]

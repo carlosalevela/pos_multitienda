@@ -7,7 +7,7 @@ class Proveedor(models.Model):
         null=True, blank=True, related_name="proveedores"
     )
     nombre    = models.CharField(max_length=150)
-    nit       = models.CharField(max_length=30, unique=True, blank=True, null=True)
+    nit       = models.CharField(max_length=30, blank=True, null=True)
     telefono  = models.CharField(max_length=20, blank=True)
     email     = models.EmailField(blank=True)
     direccion = models.CharField(max_length=200, blank=True)
@@ -20,6 +20,7 @@ class Proveedor(models.Model):
 
     class Meta:
         db_table = "proveedores"
+        unique_together = [("empresa", "nit")]
 
 
 class Compra(models.Model):

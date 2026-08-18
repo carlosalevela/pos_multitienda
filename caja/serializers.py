@@ -145,10 +145,12 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
         v_ef   = Decimal(str(self.get_ventas_efectivo(obj)))
         v_mx   = Decimal(str(self.get_ventas_mixto_efectivo(obj)))
         g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
-        a_ef   = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
-        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
+        a_ef   = agg(obj.movimientos.filter(tipo="abono_separado",      metodo_pago="efectivo"))
+        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",        metodo_pago="efectivo"))
+        cs_ef  = agg(obj.movimientos.filter(tipo="cancelacion_separado", metodo_pago="efectivo"))
+        im_ef  = agg(obj.movimientos.filter(tipo="ingreso_manual",       metodo_pago="efectivo"))
         dev_ef = self._dev_neto_ef(obj)
-        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef - g_ef - dev_ef)
+        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef + im_ef - g_ef - dev_ef - cs_ef)
 
     @staticmethod
     def anotaciones():
@@ -334,10 +336,12 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         v_mx_lg = mixto.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
         v_mx    = v_mx_ef + v_mx_lg
         g_ef    = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
-        a_ef    = agg(obj.movimientos.filter(tipo="abono_separado", metodo_pago="efectivo"))
-        ac_ef   = agg(obj.movimientos.filter(tipo="abono_credito",  metodo_pago="efectivo"))
+        a_ef    = agg(obj.movimientos.filter(tipo="abono_separado",      metodo_pago="efectivo"))
+        ac_ef   = agg(obj.movimientos.filter(tipo="abono_credito",        metodo_pago="efectivo"))
+        cs_ef   = agg(obj.movimientos.filter(tipo="cancelacion_separado", metodo_pago="efectivo"))
+        im_ef   = agg(obj.movimientos.filter(tipo="ingreso_manual",       metodo_pago="efectivo"))
         dev_ef  = self._dev_efectivo_neto(obj)
-        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef - g_ef - dev_ef)
+        return float(obj.monto_inicial + v_ef + v_mx + a_ef + ac_ef + im_ef - g_ef - dev_ef - cs_ef)
 
 
 class AbrirCajaSerializer(serializers.Serializer):

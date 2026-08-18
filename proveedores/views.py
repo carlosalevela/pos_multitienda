@@ -15,6 +15,7 @@ from core.permissions import EsAdmin, EsAdminOSupervisor, es_superadmin, get_emp
 from .models import Proveedor, Compra, DistribucionDetalle
 from .serializers import ProveedorSerializer, ProveedorSimpleSerializer, CompraSerializer
 from productos.models import Inventario, MovimientoInventario, Producto, generar_codigo_barras_interno
+from caja.models import SesionCaja
 from contabilidad.models import Gasto
 
 
@@ -158,12 +159,11 @@ class RecibirCompraView(APIView):
     @transaction.atomic
     def post(self, request, pk):
         try:
-            qs     = Compra.objects.prefetch_related(
-                "detalles__producto", "detalles__categoria",
-                "detalles__distribuciones__tienda")
-            compra = qs.get(pk=pk) if es_superadmin(request) \
-                else qs.get(pk=pk,
-                            proveedor__empresa=get_empresa(request))
+            if es_superadmin(request):
+                compra = Compra.objects.select_for_update().get(pk=pk)
+            else:
+                compra = Compra.objects.select_for_update().get(
+                    pk=pk, proveedor__empresa=get_empresa(request))
         except Compra.DoesNotExist:
             return Response(
                 {"error": "Compra no encontrada."}, status=404)
@@ -238,15 +238,13 @@ class RecibirCompraView(APIView):
                 # Distribuir stock por tienda según DistribucionDetalle
                 stock_por_tienda = []
                 for dist in distribuciones:
-                    inv, _ = Inventario.objects.select_for_update().get_or_create(
-                        producto = detalle.producto,
-                        tienda   = dist.tienda,
-                        defaults = {
-                            "stock_actual": 0,
-                            "stock_minimo": 0,
-                            "stock_maximo": 0,
-                        }
+                    Inventario.objects.get_or_create(
+                        producto=detalle.producto,
+                        tienda=dist.tienda,
+                        defaults={"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0},
                     )
+                    inv = Inventario.objects.select_for_update().get(
+                        producto=detalle.producto, tienda=dist.tienda)
                     inv.stock_actual += dist.cantidad
                     inv.save()
                     dist.cantidad_recibida = dist.cantidad
@@ -277,15 +275,13 @@ class RecibirCompraView(APIView):
                 })
             else:
                 # Modo legacy: todo va a compra.tienda
-                inv, _ = Inventario.objects.select_for_update().get_or_create(
-                    producto = detalle.producto,
-                    tienda   = compra.tienda,
-                    defaults = {
-                        "stock_actual": 0,
-                        "stock_minimo": 0,
-                        "stock_maximo": 0,
-                    }
+                Inventario.objects.get_or_create(
+                    producto=detalle.producto,
+                    tienda=compra.tienda,
+                    defaults={"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0},
                 )
+                inv = Inventario.objects.select_for_update().get(
+                    producto=detalle.producto, tienda=compra.tienda)
                 inv.stock_actual += detalle.cantidad
                 inv.save()
                 MovimientoInventario.objects.create(
@@ -324,9 +320,12 @@ class RecibirCompraView(APIView):
                     tienda_gasto = primera.tienda
                     break
         if tienda_gasto and compra.total > 0:
+            sesion_gasto = SesionCaja.objects.filter(
+                tienda=tienda_gasto, estado="abierta").first()
             Gasto.objects.create(
                 tienda      = tienda_gasto,
                 empleado    = empleado_obj,
+                sesion_caja = sesion_gasto,
                 categoria   = 'proveedor',
                 descripcion = (f'Recepción {compra.numero_orden} — '
                                f'{compra.proveedor.nombre}'),
@@ -346,13 +345,14 @@ class RecibirCompraView(APIView):
 class CancelarCompraView(APIView):
     permission_classes = [EsAdmin]
 
+    @transaction.atomic
     def post(self, request, pk):
         try:
-            compra = Compra.objects.get(pk=pk) \
-                if es_superadmin(request) \
-                else Compra.objects.get(
-                    pk=pk,
-                    proveedor__empresa=get_empresa(request))
+            if es_superadmin(request):
+                compra = Compra.objects.select_for_update().get(pk=pk)
+            else:
+                compra = Compra.objects.select_for_update().get(
+                    pk=pk, proveedor__empresa=get_empresa(request))
         except Compra.DoesNotExist:
             return Response(
                 {"error": "Compra no encontrada."}, status=404)
@@ -845,7 +845,7 @@ class CuentasPagarView(APIView):
         solo_vencidas = request.query_params.get("vencidas") == "1"
 
         qs = Compra.objects.filter(a_credito=True, pagado=False, estado="recibida")
-        qs = scope_qs(request, qs, campo_empresa="tienda__empresa", tienda_id=tienda_id)
+        qs = scope_qs(request, qs, campo_empresa="proveedor__empresa", tienda_id=tienda_id)
 
         if solo_vencidas:
             qs = qs.filter(fecha_vencimiento__lt=tz.now().date())
@@ -862,7 +862,7 @@ class CuentasPagarView(APIView):
                 "proveedor_id":     c.proveedor_id,
                 "proveedor_nombre": c.proveedor.nombre,
                 "tienda_id":        c.tienda_id,
-                "tienda_nombre":    c.tienda.nombre,
+                "tienda_nombre":    c.tienda.nombre if c.tienda else "Multi-tienda",
                 "total":            float(c.total),
                 "fecha_orden":      c.fecha_orden.date().isoformat(),
                 "fecha_vencimiento": c.fecha_vencimiento.isoformat() if c.fecha_vencimiento else None,

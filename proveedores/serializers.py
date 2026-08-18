@@ -57,6 +57,14 @@ class DistribucionDetalleSerializer(serializers.ModelSerializer):
             "cantidad":  {"required": True},
         }
 
+    def validate_tienda(self, tienda):
+        request = self.context.get("request")
+        if request and not es_superadmin(request):
+            if tienda.empresa != get_empresa(request):
+                raise serializers.ValidationError(
+                    "La tienda no pertenece a tu empresa.")
+        return tienda
+
 
 # ── Detalle Compra ─────────────────────────────────────────────
 
@@ -108,6 +116,12 @@ class DetalleCompraSerializer(serializers.ModelSerializer):
         if not tiene_producto and not tiene_nombre_libre:
             raise serializers.ValidationError(
                 "Debes seleccionar un producto o escribir un nombre.")
+        if attrs.get("cantidad", 0) <= 0:
+            raise serializers.ValidationError(
+                {"cantidad": "La cantidad debe ser mayor a cero."})
+        if attrs.get("precio_unitario", 0) <= 0:
+            raise serializers.ValidationError(
+                {"precio_unitario": "El precio unitario debe ser mayor a cero."})
         attrs["subtotal"] = attrs["cantidad"] * attrs["precio_unitario"]
         return attrs
 
@@ -192,7 +206,7 @@ class CompraSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         detalles_data = validated_data.pop("detalles")
-        empresa       = get_empresa(self.context["request"])
+        empresa       = get_empresa(self.context["request"]) or validated_data["proveedor"].empresa
         total  = sum(
             d["cantidad"] * d["precio_unitario"]
             for d in detalles_data)

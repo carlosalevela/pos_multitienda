@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics
@@ -58,12 +59,17 @@ class AbrirCajaView(APIView):
                 "desde": sesion_abierta.fecha_apertura,
             }, status=400)
 
-        sesion = SesionCaja.objects.create(
-            tienda_id=tienda_id,
-            empleado=request.user,
-            monto_inicial=monto_inicial,
-            estado="abierta",
-        )
+        try:
+            sesion = SesionCaja.objects.create(
+                tienda_id=tienda_id,
+                empleado=request.user,
+                monto_inicial=monto_inicial,
+                estado="abierta",
+            )
+        except IntegrityError:
+            return Response(
+                {"error": "Ya existe una caja abierta en esta tienda."}, status=400
+            )
 
         return Response({
             "detail":         "Caja abierta correctamente.",
@@ -78,15 +84,22 @@ class AbrirCajaView(APIView):
 class CerrarCajaView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
         try:
             filtro = {} if es_superadmin(request) else {"tienda__empresa": get_empresa(request)}
-            sesion = SesionCaja.objects.get(pk=pk, **filtro)
+            sesion = SesionCaja.objects.select_for_update().get(pk=pk, **filtro)
         except SesionCaja.DoesNotExist:
             return Response({"error": "Sesión de caja no encontrada."}, status=404)
 
         if sesion.estado == "cerrada":
             return Response({"error": "Esta caja ya está cerrada."}, status=400)
+
+        if not es_superadmin(request) and request.user.rol == "cajero":
+            if sesion.tienda_id != request.user.tienda_id:
+                return Response(
+                    {"error": "No tienes permiso para cerrar esta caja."}, status=403
+                )
 
         serializer = CerrarCajaSerializer(data=request.data)
         if not serializer.is_valid():
@@ -113,12 +126,14 @@ class CerrarCajaView(APIView):
         base_a  = sesion.movimientos.filter(tipo="abono_separado")
         base_ac = sesion.movimientos.filter(tipo="abono_credito")
         base_cs = sesion.movimientos.filter(tipo="cancelacion_separado")
+        base_im = sesion.movimientos.filter(tipo="ingreso_manual")
         abonos_efectivo      = base_a.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_tarjeta       = base_a.filter(metodo_pago="tarjeta").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_transferencia = base_a.filter(metodo_pago="transferencia").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         abonos_total         = abonos_efectivo + abonos_tarjeta + abonos_transferencia
-        credito_efectivo     = base_ac.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        credito_efectivo       = base_ac.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         cancelaciones_efectivo = base_cs.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        ingresos_manual        = base_im.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
         base_d = Devolucion.objects.filter(venta__sesion_caja=sesion, estado="procesada")
         dev_efectivo     = base_d.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
@@ -129,6 +144,7 @@ class CerrarCajaView(APIView):
         monto_sistema = (
             sesion.monto_inicial + total_ventas
             + abonos_efectivo + credito_efectivo
+            + ingresos_manual
             - total_gastos - neto_dev_efectivo
             - cancelaciones_efectivo
         )
@@ -153,6 +169,7 @@ class CerrarCajaView(APIView):
             "abonos_transferencia":    float(abonos_transferencia),
             "abonos_total":            float(abonos_total),
             "cancelaciones_efectivo":  float(cancelaciones_efectivo),
+            "ingresos_manual":         float(ingresos_manual),
             "total_devoluciones":      float(neto_dev_efectivo),
             "monto_final_sistema":  float(monto_sistema),
             "monto_final_real":     float(monto_real),
@@ -226,9 +243,12 @@ class SesionCajaDetailView(generics.RetrieveAPIView):
     def get_queryset(self):
         if es_superadmin(self.request):
             return SesionCaja.objects.select_related("empleado", "tienda")
-        return SesionCaja.objects.filter(
+        qs = SesionCaja.objects.filter(
             tienda__empresa=get_empresa(self.request)
         ).select_related("empleado", "tienda")
+        if self.request.user.rol == "cajero":
+            qs = qs.filter(tienda_id=self.request.user.tienda_id)
+        return qs
 
 
 # ── Resumen pre-cierre ────────────────────────────────────────
@@ -244,6 +264,12 @@ class ResumenCierreView(APIView):
             sesion = SesionCaja.objects.select_related("tienda", "empleado").get(**filtro)
         except SesionCaja.DoesNotExist:
             return Response({"error": "Sesión no encontrada o ya cerrada."}, status=404)
+
+        if not es_superadmin(request) and request.user.rol == "cajero":
+            if sesion.tienda_id != request.user.tienda_id:
+                return Response(
+                    {"error": "No tienes permiso para ver esta sesión."}, status=403
+                )
 
         def agg(qs):   return qs.aggregate(t=Sum("monto"))["t"]          or Decimal("0")
         def vsum(qs):  return qs.aggregate(t=Sum("total"))["t"]          or Decimal("0")
@@ -280,7 +306,9 @@ class ResumenCierreView(APIView):
         base_ac         = sesion.movimientos.filter(tipo="abono_credito")
         ac_efectivo     = agg(base_ac.filter(metodo_pago="efectivo"))
         base_cs         = sesion.movimientos.filter(tipo="cancelacion_separado")
+        base_im         = sesion.movimientos.filter(tipo="ingreso_manual")
         cs_efectivo     = agg(base_cs.filter(metodo_pago="efectivo"))
+        im_efectivo     = agg(base_im.filter(metodo_pago="efectivo"))
 
         dev_efectivo     = dsum(base_d.filter(tipo="devolucion", metodo_devolucion="efectivo"))
         cambios_cobrar   = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo"))
@@ -290,6 +318,7 @@ class ResumenCierreView(APIView):
         monto_esperado = (
             sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
+            + im_efectivo
             - g_efectivo - neto_dev_efectivo
             - cs_efectivo
         )
@@ -325,8 +354,9 @@ class ResumenCierreView(APIView):
                 "tarjeta":               float(a_tarjeta),
                 "total":                 float(a_efectivo + a_transferencia + a_tarjeta),
                 "cantidad":              num_abonos,
-                "credito_efectivo":      float(ac_efectivo),
+                "credito_efectivo":        float(ac_efectivo),
                 "cancelaciones_efectivo": float(cs_efectivo),
+                "ingresos_manual":        float(im_efectivo),
             },
             "devoluciones": {
                 "efectivo":         float(dev_efectivo),

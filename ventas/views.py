@@ -161,6 +161,7 @@ class VentaListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
+        from django.utils.timezone import localdate
         user = self.request.user
         qs   = Venta.objects.select_related(
             "cliente", "empleado", "tienda", "sesion_caja"
@@ -170,25 +171,28 @@ class VentaListView(generics.ListAPIView):
 
         if user.rol == "cajero":
             qs    = qs.filter(tienda_id=user.tienda_id)
-            fecha = self.request.query_params.get("fecha")
-            if fecha:
-                qs = qs.filter(created_at__date=fecha)
-            return qs.order_by("-created_at")
+            fecha = self.request.query_params.get("fecha") or str(localdate())
+            qs = qs.filter(created_at__date=fecha)
+            return qs.order_by("-created_at")[:500]
 
-        tienda_id = self.request.query_params.get("tienda_id")
-        sesion_id = self.request.query_params.get("sesion_id")
-        fecha     = self.request.query_params.get("fecha")
-        cliente   = self.request.query_params.get("cliente_id")
-
+        tienda_id    = self.request.query_params.get("tienda_id")
+        sesion_id    = self.request.query_params.get("sesion_id")
+        fecha        = self.request.query_params.get("fecha")
+        cliente      = self.request.query_params.get("cliente_id")
         numero_orden = self.request.query_params.get("numero_orden")
 
         if tienda_id:    qs = qs.filter(tienda_id=tienda_id)
         if sesion_id:    qs = qs.filter(sesion_caja_id=sesion_id)
-        if fecha:        qs = qs.filter(created_at__date=fecha)
         if cliente:      qs = qs.filter(cliente_id=cliente)
         if numero_orden: qs = qs.filter(numero_factura__icontains=numero_orden)
 
-        return qs.order_by("-created_at")
+        # If no specific filter provided, default to today to avoid full-table scan
+        if fecha:
+            qs = qs.filter(created_at__date=fecha)
+        elif not any([tienda_id, sesion_id, cliente, numero_orden]):
+            qs = qs.filter(created_at__date=localdate())
+
+        return qs.order_by("-created_at")[:500]
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -344,10 +348,13 @@ class AbonarCreditoView(APIView):
     @transaction.atomic
     def post(self, request, pk):
         from .models import PagoVenta
-        empresa = get_empresa(request)
         try:
-            venta = Venta.objects.select_for_update().get(
-                pk=pk, empresa=empresa, a_credito=True)
+            if es_superadmin(request):
+                venta = Venta.objects.select_for_update().get(pk=pk, a_credito=True)
+            else:
+                empresa = get_empresa(request)
+                venta = Venta.objects.select_for_update().get(
+                    pk=pk, empresa=empresa, a_credito=True)
         except Venta.DoesNotExist:
             return Response({'error': 'Venta a crédito no encontrada.'}, status=404)
 
@@ -420,18 +427,23 @@ class CarteraView(APIView):
 
     def get(self, request):
         from collections import defaultdict
-        empresa   = get_empresa(request)
         tienda_id = request.query_params.get("tienda_id")
 
-        qs = (
-            Venta.objects
-            .filter(empresa=empresa, a_credito=True, estado="completada")
-            .prefetch_related("pagos")
-            .select_related("cliente", "tienda")
-            .order_by("cliente_id", "-created_at")
-        )
+        if es_superadmin(request):
+            qs = Venta.objects.filter(a_credito=True, estado="completada")
+        else:
+            empresa = get_empresa(request)
+            qs = Venta.objects.filter(empresa=empresa, a_credito=True, estado="completada")
+
         if tienda_id:
             qs = qs.filter(tienda_id=tienda_id)
+
+        qs = (
+            qs
+            .prefetch_related("pagos")
+            .select_related("cliente", "tienda")
+            .order_by("cliente_id", "-created_at")[:2000]
+        )
 
         cartera: dict = defaultdict(lambda: {
             "cliente_id":      None,
@@ -604,27 +616,40 @@ class DashboardAdminView(APIView):
         if tienda_id:
             tienda_qs = tienda_qs.filter(id=tienda_id)
 
+        tienda_ids = list(tienda_qs.values_list("id", flat=True))
+
+        ventas_hoy_map = dict(
+            Venta.objects.filter(
+                tienda_id__in=tienda_ids, estado="completada", created_at__date=hoy,
+            ).values("tienda_id").annotate(s=Sum("total")).values_list("tienda_id", "s")
+        )
+        cajas_abiertas_map = dict(
+            SesionCaja.objects.filter(tienda_id__in=tienda_ids, estado="abierta")
+            .values("tienda_id").annotate(c=Count("id")).values_list("tienda_id", "c")
+        )
+        cajas_hoy_map = dict(
+            SesionCaja.objects.filter(
+                tienda_id__in=tienda_ids, fecha_apertura__date=hoy,
+            ).values("tienda_id").annotate(c=Count("id")).values_list("tienda_id", "c")
+        )
+        encargados_map: dict = {}
+        for e in (
+            Empleado.objects
+            .filter(tienda_id__in=tienda_ids, rol__in=["admin", "supervisor"], activo=True)
+            .values("tienda_id", "nombre", "apellido")
+            .order_by("tienda_id")
+        ):
+            if e["tienda_id"] not in encargados_map:
+                encargados_map[e["tienda_id"]] = f"{e['nombre']} {e['apellido']}"
+
         desempeno = []
         for t in tienda_qs:
-            v_hoy = Venta.objects.filter(
-                tienda=t, estado="completada",
-                created_at__date=hoy,
-            ).aggregate(total=Sum("total"))["total"] or 0
-
-            cajas_abiertas = SesionCaja.objects.filter(
-                tienda=t, estado="abierta").count()
-            cajas_hoy   = SesionCaja.objects.filter(
-                tienda=t, fecha_apertura__date=hoy).count()
-            cajas_total = max(cajas_hoy, cajas_abiertas, 1)
-            eficiencia  = round((cajas_abiertas / cajas_total) * 100)
-
-            encargado = Empleado.objects.filter(
-                tienda=t, rol__in=["admin", "supervisor"], activo=True,
-            ).first()
-            nombre_enc = (
-                f"{encargado.nombre} {encargado.apellido}"
-                if encargado else "—"
-            )
+            v_hoy          = float(ventas_hoy_map.get(t.id) or 0)
+            cajas_abiertas = cajas_abiertas_map.get(t.id, 0)
+            cajas_hoy_cnt  = cajas_hoy_map.get(t.id, 0)
+            cajas_total    = max(cajas_hoy_cnt, cajas_abiertas, 1)
+            eficiencia     = round((cajas_abiertas / cajas_total) * 100)
+            nombre_enc     = encargados_map.get(t.id, "—")
 
             estado = (
                 "optimo"   if eficiencia >= 90
@@ -636,7 +661,7 @@ class DashboardAdminView(APIView):
                 "tienda_id":      t.id,
                 "nombre":         t.nombre,
                 "encargado":      nombre_enc,
-                "ventas_hoy":     float(v_hoy),
+                "ventas_hoy":     v_hoy,
                 "cajas_activas":  cajas_abiertas,
                 "cajas_total":    cajas_total,
                 "eficiencia_pct": eficiencia,

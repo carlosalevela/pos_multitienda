@@ -111,7 +111,12 @@ class ConfigDefaultsView(APIView):
         return Response({
             "moneda_simbolo":      "$",
             "moneda_codigo":       "USD",
-            "iva_pct":             float(empresa.iva_pct) if empresa and hasattr(empresa, "iva_pct") else 0,
+            "iva_pct":             float(
+                ConfigTienda.objects
+                .filter(tienda__empresa=empresa)
+                .values_list("iva_pct", flat=True)
+                .first() or 0
+            ) if empresa else 0,
             "metodos_pago":        METODOS_PAGO_DEFAULT,
             "habilitar_mayoreo":   empresa.maneja_mayoreo if empresa else False,
             "cantidad_mayoreo":    empresa.cantidad_mayoreo if empresa else 12,

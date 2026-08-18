@@ -11,7 +11,7 @@ def crear_inventario_para_nueva_tienda(sender, instance, created, **kwargs):
     para todos los productos activos existentes.
     """
     if created:
-        productos = Producto.objects.filter(activo=True)
+        productos = Producto.objects.filter(activo=True, empresa=instance.empresa)
         inventarios = [
             Inventario(
                 producto     = producto,

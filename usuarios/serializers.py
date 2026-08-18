@@ -40,6 +40,7 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
             "email",
             "password",
             "rol",
+            "activo",
             "tienda",
             "empresa",
         ]
@@ -50,6 +51,17 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         request = self.context.get("request")
         tienda = attrs.get("tienda")
+        rol    = attrs.get("rol")
+
+        if rol == "superadmin" and not es_superadmin(request):
+            raise serializers.ValidationError({
+                "rol": "No puedes asignar el rol de superadmin."
+            })
+
+        if rol == "cajero" and not tienda:
+            raise serializers.ValidationError({
+                "tienda": "Un cajero debe tener una tienda asignada."
+            })
 
         if not request or not tienda:
             return attrs
@@ -80,6 +92,15 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
         empleado.set_password(password)
         empleado.save()
         return empleado
+
+    def update(self, instance, validated_data):
+        password = validated_data.pop("password", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if password:
+            instance.set_password(password)
+        instance.save()
+        return instance
 
 
 class CustomTokenSerializer(TokenObtainPairSerializer):

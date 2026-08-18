@@ -37,8 +37,11 @@ MESES = [
 ]
 
 
+MAX_DIAS_RANGO = 366
+
+
 def _validar_rango(fecha_ini, fecha_fin):
-    """Returns 400 Response if fechas are invalid or inverted, else None."""
+    """Returns 400 Response if fechas are invalid, inverted, or exceed MAX_DIAS_RANGO."""
     from datetime import date as _date
     try:
         fi = _date.fromisoformat(str(fecha_ini))
@@ -48,6 +51,11 @@ def _validar_rango(fecha_ini, fecha_fin):
     if fi > ff:
         return Response(
             {"error": "fecha_ini no puede ser posterior a fecha_fin."}, status=400
+        )
+    if (ff - fi).days > MAX_DIAS_RANGO:
+        return Response(
+            {"error": f"El rango no puede superar {MAX_DIAS_RANGO} días."},
+            status=400,
         )
     return None
 
@@ -149,10 +157,10 @@ class GastoListCreateView(generics.ListCreateAPIView):
         visibilidad_enviada = self.request.data.get("visibilidad", "")
         rol                 = self.request.user.rol
 
-        if visibilidad_enviada in ('todos', 'solo_admin'):
-            visibilidad = visibilidad_enviada
-        elif rol == 'cajero' or categoria_val not in CATEGORIAS_SOLO_ADMIN:
+        if rol == 'cajero' or categoria_val not in CATEGORIAS_SOLO_ADMIN:
             visibilidad = 'todos'
+        elif visibilidad_enviada in ('todos', 'solo_admin'):
+            visibilidad = visibilidad_enviada
         else:
             visibilidad = 'solo_admin'
 

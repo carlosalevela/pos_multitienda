@@ -48,6 +48,17 @@ class ClienteListCreateView(generics.ListCreateAPIView):
             )
         return qs.order_by("nombre")
 
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not es_superadmin(self.request):
+            empresa = get_empresa(self.request)
+            if empresa:
+                context['tier_configs'] = list(
+                    TierConfig.objects.filter(empresa=empresa, activo=True)
+                    .order_by('-umbral_min')
+                )
+        return context
+
     def perform_create(self, serializer):
         if es_superadmin(self.request):
             serializer.save()
@@ -97,6 +108,17 @@ class ClienteSimpleListView(generics.ListAPIView):
             qs = qs.filter(
                 Q(nombre__icontains=q) | Q(cedula_nit__icontains=q))
         return qs.order_by("nombre")
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        if not es_superadmin(self.request):
+            empresa = get_empresa(self.request)
+            if empresa:
+                context['tier_configs'] = list(
+                    TierConfig.objects.filter(empresa=empresa, activo=True)
+                    .order_by('-umbral_min')
+                )
+        return context
 
 
 # ── Separados ─────────────────────────────────────────────

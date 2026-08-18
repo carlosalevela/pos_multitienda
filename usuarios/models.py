@@ -37,12 +37,16 @@ class Empleado(AbstractBaseUser, PermissionsMixin):
     )
     nombre     = models.CharField(max_length=100)
     apellido   = models.CharField(max_length=100)
-    cedula     = models.CharField(max_length=20, unique=True)
+    cedula     = models.CharField(max_length=20)
     email      = models.EmailField(unique=True)
     rol        = models.CharField(
         max_length=20, choices=ROL_CHOICES, default="cajero")
     activo     = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    @property
+    def is_active(self):
+        return self.activo
     is_staff   = models.BooleanField(default=False)
 
     USERNAME_FIELD  = "email"
@@ -67,3 +71,4 @@ class Empleado(AbstractBaseUser, PermissionsMixin):
 
     class Meta:
         db_table = "empleados"
+        unique_together = [("empresa", "cedula")]

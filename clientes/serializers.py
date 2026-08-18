@@ -26,7 +26,23 @@ class TierConfigSerializer(serializers.ModelSerializer):
 
 
 # ─── Helper compartido ────────────────────────────────────────────────────────
-def _tier_info(obj):
+def _tier_info(obj, tier_configs=None):
+    """
+    Calcula el tier del cliente. Si se pasa `tier_configs` (lista pre-cargada
+    ordenada por -umbral_min) no dispara ninguna query adicional.
+    """
+    if tier_configs is not None:
+        acum = obj.total_acumulado
+        for tc in tier_configs:
+            if tc.umbral_min <= acum:
+                if tc.umbral_max is None or tc.umbral_max > acum:
+                    return {
+                        'id':            tc.id,
+                        'nombre':        tc.nombre,
+                        'descuento_pct': float(tc.descuento_pct),
+                        'color_hex':     tc.color_hex,
+                    }
+        return None
     tier = obj.tier_actual
     if tier is None:
         return None
@@ -52,7 +68,7 @@ class ClienteSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'empresa', 'total_acumulado', 'created_at']
 
     def get_tier_info(self, obj):
-        return _tier_info(obj)
+        return _tier_info(obj, self.context.get('tier_configs'))
 
     def validate_cedula_nit(self, value):
         if not value:
@@ -76,7 +92,7 @@ class ClienteSimpleSerializer(serializers.ModelSerializer):
         fields = ['id', 'nombre', 'apellido', 'cedula_nit', 'telefono', 'limite_credito', 'tier_info']
 
     def get_tier_info(self, obj):
-        return _tier_info(obj)
+        return _tier_info(obj, self.context.get('tier_configs'))
 
 
 # ─── Detalle Separado ────────────────────────────────────────────────────────

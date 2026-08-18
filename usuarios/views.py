@@ -1,3 +1,5 @@
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework import generics
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -16,6 +18,7 @@ from .serializers import EmpleadoSerializer, CrearEmpleadoSerializer, CustomToke
 class LoginView(TokenObtainPairView):
     permission_classes = [AllowAny]
     serializer_class   = CustomTokenSerializer
+    throttle_scope     = 'login'
 
 
 class LogoutView(APIView):
@@ -41,7 +44,7 @@ class MiPerfilView(APIView):
         return Response(serializer.data)
 
     def patch(self, request):
-        CAMPOS_PERMITIDOS = {"nombre", "apellido", "telefono", "email"}
+        CAMPOS_PERMITIDOS = {"nombre", "apellido", "telefono"}
         data = {k: v for k, v in request.data.items()
                 if k in CAMPOS_PERMITIDOS}
         serializer = EmpleadoSerializer(
@@ -110,6 +113,13 @@ class EmpleadoDetailView(generics.RetrieveUpdateDestroyAPIView):
         context["request"] = self.request
         return context
 
+    def perform_update(self, serializer):
+        if "password" in self.request.data and not es_superadmin(self.request):
+            if serializer.instance.rol in ("admin", "superadmin"):
+                raise PermissionDenied(
+                    "No puedes restablecer la contraseña de un administrador.")
+        serializer.save()
+
     def destroy(self, request, *args, **kwargs):
         empleado = self.get_object()
         empleado.activo = False
@@ -129,11 +139,23 @@ class CambiarPasswordView(APIView):
         if not user.check_password(old_pass):
             return Response(
                 {"error": "Contraseña actual incorrecta."}, status=400)
-        if not new_pass or len(new_pass) < 6:
-            return Response(
-                {"error": "Mínimo 6 caracteres."}, status=400)
+        if not new_pass:
+            return Response({"error": "La nueva contraseña es requerida."}, status=400)
+
+        try:
+            validate_password(new_pass, user)
+        except DjangoValidationError as e:
+            return Response({"error": " ".join(e.messages)}, status=400)
 
         user.set_password(new_pass)
         user.save()
+
+        refresh_token = request.data.get("refresh")
+        if refresh_token:
+            try:
+                RefreshToken(refresh_token).blacklist()
+            except Exception:
+                pass
+
         return Response(
             {"detail": "Contraseña actualizada correctamente."})

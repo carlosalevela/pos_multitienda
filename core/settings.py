@@ -244,3 +244,7 @@ LOGGING = {
         },
     },
 }
+
+ALLOWED_HOSTS = [
+    'https://web-production-8ab3f.up.railway.app/'
+]

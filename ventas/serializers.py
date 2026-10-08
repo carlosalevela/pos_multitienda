@@ -159,7 +159,6 @@ class VentaSerializer(serializers.ModelSerializer):
             cliente = validated_data["cliente"]
             from clientes.models import Cliente as ClienteModel
             from django.db.models import Sum
-            from .models import PagoVenta
             # Lock en el cliente para serializar validaciones de crédito concurrentes
             cliente = ClienteModel.objects.select_for_update().get(pk=cliente.pk)
             validated_data["cliente"] = cliente

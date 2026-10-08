@@ -158,6 +158,67 @@ class CerrarCajaView(APIView):
         sesion.fecha_cierre        = timezone.now()
         sesion.save()
 
+        # ── WhatsApp: notificar cierre de turno ──────────────────
+        try:
+            from configuracion.whatsapp_service import enviar_cierre_turno
+            from ventas.models import Venta as _Venta
+
+            base_v_total   = _Venta.objects.filter(sesion_caja=sesion, estado="completada")
+            _v_ef          = base_v_total.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tar         = base_v_total.filter(metodo_pago="tarjeta").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tra         = base_v_total.filter(metodo_pago="transferencia").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_mix         = base_v_total.filter(metodo_pago="mixto").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _num_v         = base_v_total.count()
+
+            from django.utils import timezone as _tz
+            _fecha = sesion.fecha_cierre or _tz.now()
+            _meses = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                      "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+            _fecha_str = (
+                f"{_fecha.day} {_meses[_fecha.month]} {_fecha.year}, "
+                f"{_fecha.hour:02d}:{_fecha.minute:02d}"
+            )
+
+            _nombre_emp = (
+                f"{sesion.empleado.nombre} {sesion.empleado.apellido}"
+                if sesion.empleado else "—"
+            )
+
+            enviar_cierre_turno(
+                empresa_id=sesion.tienda.empresa_id,
+                tienda_id=sesion.tienda_id,
+                datos={
+                    "tienda_nombre":      sesion.tienda.nombre,
+                    "colaborador_nombre": _nombre_emp,
+                    "fecha_cierre":       _fecha_str,
+                    "monto_inicial":      float(sesion.monto_inicial),
+                    "ventas": {
+                        "total":             float(total_ventas),
+                        "efectivo":          float(_v_ef),
+                        "tarjeta":           float(_v_tar),
+                        "transferencia":     float(_v_tra),
+                        "mixto":             float(_v_mix),
+                        "num_transacciones": _num_v,
+                    },
+                    "abonos_separados": {
+                        "total":    float(abonos_total),
+                        "cantidad": sesion.movimientos.filter(tipo="abono_separado").count(),
+                    },
+                    "credito_efectivo":       float(credito_efectivo),
+                    "cancelaciones_efectivo": float(cancelaciones_efectivo),
+                    "ingresos_manual":        float(ingresos_manual),
+                    "devoluciones_neto_ef":   float(neto_dev_efectivo),
+                    "total_gastos":           float(total_gastos),
+                    "monto_esperado":         float(monto_sistema),
+                    "diferencia":             float(diferencia),
+                },
+            )
+        except Exception as _wa_exc:
+            import traceback, logging as _log
+            _log.getLogger(__name__).error(
+                "WhatsApp cierre error: %s\n%s", _wa_exc, traceback.format_exc()
+            )
+
         return Response({
             "detail":               "Caja cerrada correctamente.",
             "sesion_id":            sesion.id,

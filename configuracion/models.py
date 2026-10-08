@@ -74,6 +74,50 @@ class ConfigTienda(models.Model):
         super().save(*args, **kwargs)
 
 
+class WhatsAppConfig(models.Model):
+    """Credenciales globales de la API de WhatsApp Business (Meta Cloud API)."""
+    empresa = models.OneToOneField(
+        "empresas.Empresa", on_delete=models.CASCADE,
+        related_name="whatsapp_config",
+    )
+    token           = models.TextField(help_text="Bearer token de acceso (Meta Cloud API).")
+    phone_number_id = models.CharField(max_length=50, help_text="Phone Number ID de Meta.")
+    activo          = models.BooleanField(default=True)
+    updated_at      = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "whatsapp_config"
+        verbose_name = "Config WhatsApp"
+
+    def __str__(self):
+        return f"WhatsApp — {self.empresa}"
+
+
+class WhatsAppDestinatario(models.Model):
+    """Número que recibe el resumen de cierre de turno."""
+    empresa = models.ForeignKey(
+        "empresas.Empresa", on_delete=models.CASCADE,
+        related_name="whatsapp_destinatarios",
+    )
+    tiendas = models.ManyToManyField(
+        "tiendas.Tienda", blank=True,
+        help_text="Tiendas cuyos cierres recibe este número. Vacío = todas.",
+    )
+    nombre  = models.CharField(max_length=100)
+    numero  = models.CharField(
+        max_length=20,
+        help_text="Número con código de país, sin +. Ej: 573158618847",
+    )
+    activo  = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "whatsapp_destinatario"
+        verbose_name = "Destinatario WhatsApp"
+
+    def __str__(self):
+        return f"{self.nombre} ({self.numero})"
+
+
 class ConfigImpresion(models.Model):
     PAPEL_CHOICES = [
         ("80mm", "Térmica 80mm"),

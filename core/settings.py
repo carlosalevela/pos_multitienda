@@ -246,6 +246,7 @@ LOGGING = {
 }
 
 ALLOWED_HOSTS = [
-    'https://web-production-8ab3f.up.railway.app/'
-    'localhost'
+    'web-production-8ab3f.up.railway.app',
+    'localhost',
+    '127.0.0.1',
 ]

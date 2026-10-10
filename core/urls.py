@@ -16,4 +16,5 @@ urlpatterns = [
     path("api/contabilidad/", include("contabilidad.urls")),
     path("api/empresas/",     include("empresas.urls")),
     path("api/config/",       include("configuracion.urls")),
+    path("api/documentos/",   include("documentos.urls")),
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

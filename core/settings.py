@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'devoluciones',
     'empresas',
     'configuracion',
+    'documentos',
 ]
 
 MIDDLEWARE = [

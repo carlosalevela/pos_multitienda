@@ -89,6 +89,13 @@ class Devolucion(models.Model):
         blank=True,
         default="",
     )
+    cuenta_destino = models.ForeignKey(
+        "configuracion.CuentaBancaria",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="devoluciones",
+    )
     monto_recibido = models.DecimalField(
         max_digits=12,
         decimal_places=2,

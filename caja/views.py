@@ -376,6 +376,47 @@ class ResumenCierreView(APIView):
         cambios_devolver = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo"))
         neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
 
+        # Ventas detalle (productos por transacción)
+        ventas_detalle = []
+        for v in base_v.select_related("cliente", "empleado").prefetch_related("detalles__producto").order_by("created_at"):
+            hora = v.created_at.strftime("%H:%M") if v.created_at else ""
+            cliente = ""
+            if v.cliente:
+                cliente = f"{v.cliente.nombre} {getattr(v.cliente, 'apellido', '')}".strip()
+            productos = [
+                {
+                    "producto": d.producto.nombre,
+                    "cantidad": float(d.cantidad),
+                    "precio":   float(d.precio_unitario),
+                    "subtotal": float(d.subtotal),
+                }
+                for d in v.detalles.all()
+            ]
+            ventas_detalle.append({
+                "id":             v.id,
+                "numero_factura": v.numero_factura,
+                "hora":           hora,
+                "cliente":        cliente or "Consumidor Final",
+                "metodo_pago":    v.metodo_pago,
+                "total":          float(v.total),
+                "productos":      productos,
+            })
+
+        detalle_devs = []
+        for d in base_d.select_related("venta", "cuenta_destino", "producto_reemplazo").prefetch_related("detalles__producto").order_by("created_at"):
+            metodo = d.metodo_pago_diferencia if (d.tipo == "cambio" and d.metodo_pago_diferencia) else d.metodo_devolucion
+            detalle_devs.append({
+                "id":                  d.id,
+                "venta_numero":        d.venta.numero_factura,
+                "tipo":                d.tipo,
+                "tipo_diferencia":     d.tipo_diferencia or "",
+                "total_devuelto":      float(d.total_devuelto),
+                "diferencia":          float(d.diferencia or 0),
+                "metodo":              metodo,
+                "cuenta_nombre":       d.cuenta_destino.nombre if d.cuenta_destino else None,
+                "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
+            })
+
         monto_esperado = (
             sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
@@ -428,8 +469,10 @@ class ResumenCierreView(APIView):
                 "cambios_producto": base_d.filter(
                     tipo="cambio", producto_reemplazo__isnull=False
                 ).count(),
+                "detalle":          detalle_devs,
             },
             "monto_esperado_caja": float(monto_esperado),
+            "ventas_detalle":      ventas_detalle,
         })
 
 

@@ -54,11 +54,13 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
 
 
 class VentaSerializer(serializers.ModelSerializer):
-    detalles        = DetalleVentaSerializer(many=True)
-    pagos           = PagoVentaSerializer(many=True, write_only=True, required=False, default=list)
-    cliente_nombre  = serializers.SerializerMethodField()
-    empleado_nombre = serializers.SerializerMethodField()
-    tienda_nombre   = serializers.CharField(source="tienda.nombre", read_only=True)
+    detalles              = DetalleVentaSerializer(many=True)
+    pagos                 = PagoVentaSerializer(many=True, write_only=True, required=False, default=list)
+    cliente_nombre        = serializers.SerializerMethodField()
+    empleado_nombre       = serializers.SerializerMethodField()
+    tienda_nombre         = serializers.CharField(source="tienda.nombre", read_only=True)
+    cuenta_destino_nombre = serializers.SerializerMethodField()
+    cuenta_destino_tipo   = serializers.SerializerMethodField()
 
     class Meta:
         model  = Venta
@@ -68,7 +70,9 @@ class VentaSerializer(serializers.ModelSerializer):
             "sesion_caja", "cliente", "cliente_nombre",
             "empleado", "empleado_nombre",
             "subtotal", "descuento_total", "impuesto_total",
-            "total", "metodo_pago", "cuenta_destino", "a_credito",
+            "total", "metodo_pago",
+            "cuenta_destino", "cuenta_destino_nombre", "cuenta_destino_tipo",
+            "a_credito",
             "monto_recibido", "vuelto",
             "estado", "observaciones",
             "created_at", "detalles", "pagos"
@@ -88,6 +92,12 @@ class VentaSerializer(serializers.ModelSerializer):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
+
+    def get_cuenta_destino_nombre(self, obj):
+        return obj.cuenta_destino.nombre if obj.cuenta_destino else None
+
+    def get_cuenta_destino_tipo(self, obj):
+        return obj.cuenta_destino.get_tipo_display() if obj.cuenta_destino else None
 
     def validate_tienda(self, tienda):
         request = self.context.get("request")

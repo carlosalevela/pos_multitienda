@@ -156,8 +156,18 @@ class CrearDevolucionView(APIView):
                               f"{disponible} unidades disponibles."},
                     status=status.HTTP_400_BAD_REQUEST)
 
+        cuenta_destino = None
+        cuenta_destino_id = request.data.get("cuenta_destino")
+        if cuenta_destino_id:
+            from configuracion.models import CuentaBancaria
+            try:
+                cuenta_destino = CuentaBancaria.objects.get(pk=int(cuenta_destino_id))
+            except (CuentaBancaria.DoesNotExist, TypeError, ValueError):
+                pass
+
         devolucion = serializer.save(
-            empleado=request.user, tienda=venta.tienda)
+            empleado=request.user, tienda=venta.tienda,
+            cuenta_destino=cuenta_destino)
         _restaurar_stock(devolucion, request.user, venta)
 
         # Si la venta fue a crédito, reducir la deuda pendiente
@@ -358,6 +368,15 @@ class CambioProductoView(APIView):
 
         empleado_obj = request.user
 
+        cuenta_destino = None
+        cuenta_destino_id = request.data.get("cuenta_destino")
+        if cuenta_destino_id:
+            from configuracion.models import CuentaBancaria
+            try:
+                cuenta_destino = CuentaBancaria.objects.get(pk=int(cuenta_destino_id))
+            except (CuentaBancaria.DoesNotExist, TypeError, ValueError):
+                pass
+
         devolucion = serializer.save(
             empleado=request.user,
             tienda=venta.tienda,
@@ -370,6 +389,7 @@ class CambioProductoView(APIView):
             metodo_pago_diferencia=metodo_pago_diferencia,
             monto_recibido=monto_recibido,
             cambio_entregado=cambio_entregado,
+            cuenta_destino=cuenta_destino,
         )
 
         _restaurar_stock(devolucion, empleado_obj, venta)

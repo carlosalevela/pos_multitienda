@@ -196,6 +196,14 @@ class SeparadoSerializer(serializers.ModelSerializer):
                 'El cliente no pertenece a tu empresa.')
         return cliente
 
+    def validate_fecha_limite(self, value):
+        if value is None:
+            raise serializers.ValidationError('La fecha límite es obligatoria.')
+        from django.utils import timezone
+        if value < timezone.now().date():
+            raise serializers.ValidationError('La fecha límite no puede ser en el pasado.')
+        return value
+
     def validate(self, attrs):
         tienda   = attrs.get('tienda')
         cliente  = attrs.get('cliente')
@@ -206,6 +214,9 @@ class SeparadoSerializer(serializers.ModelSerializer):
         if not detalles:
             raise serializers.ValidationError(
                 {'detalles': 'El separado debe tener al menos un producto.'})
+        if not attrs.get('fecha_limite'):
+            raise serializers.ValidationError(
+                {'fecha_limite': 'La fecha límite es obligatoria.'})
         return attrs
 
     def create(self, validated_data):

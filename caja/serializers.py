@@ -186,6 +186,8 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     num_transacciones        = serializers.SerializerMethodField()
     gastos_total             = serializers.SerializerMethodField()
     gastos_detalle           = serializers.SerializerMethodField()
+    devoluciones_detalle     = serializers.SerializerMethodField()
+    ventas_detalle           = serializers.SerializerMethodField()
     devoluciones_efectivo    = serializers.SerializerMethodField()
     devoluciones_directas_ef = serializers.SerializerMethodField()
     cambios_cobrar_ef        = serializers.SerializerMethodField()
@@ -214,6 +216,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "ventas_total", "ventas_efectivo", "ventas_tarjeta",
             "ventas_transferencia", "ventas_mixto", "ventas_mixto_efectivo",
             "num_transacciones", "gastos_total", "gastos_detalle",
+            "ventas_detalle", "devoluciones_detalle",
             "devoluciones_efectivo", "devoluciones_directas_ef",
             "cambios_cobrar_ef", "cambios_devolver_ef",
             "num_devoluciones", "num_cambios_producto",
@@ -279,6 +282,71 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             Gasto.objects.filter(sesion_caja=obj)
             .values("categoria", "descripcion", "monto", "metodo_pago")
         )
+
+    def get_ventas_detalle(self, obj):
+        from ventas.models import Venta
+        ventas = (
+            Venta.objects
+            .filter(sesion_caja=obj, estado="completada")
+            .select_related("cliente", "empleado")
+            .prefetch_related("detalles__producto")
+            .order_by("created_at")
+        )
+        result = []
+        for v in ventas:
+            hora = v.created_at.strftime("%H:%M") if v.created_at else ""
+            cliente = ""
+            if v.cliente:
+                cliente = f"{v.cliente.nombre} {getattr(v.cliente, 'apellido', '')}".strip()
+            productos = [
+                {
+                    "producto":   det.producto.nombre,
+                    "cantidad":   float(det.cantidad),
+                    "precio":     float(det.precio_unitario),
+                    "subtotal":   float(det.subtotal),
+                }
+                for det in v.detalles.all()
+            ]
+            result.append({
+                "id":             v.id,
+                "numero_factura": v.numero_factura,
+                "hora":           hora,
+                "cliente":        cliente or "Consumidor Final",
+                "metodo_pago":    v.metodo_pago,
+                "total":          float(v.total),
+                "productos":      productos,
+            })
+        return result
+
+    def get_devoluciones_detalle(self, obj):
+        from devoluciones.models import Devolucion
+        devs = (
+            Devolucion.objects
+            .filter(venta__sesion_caja=obj, estado="procesada")
+            .select_related("venta", "cuenta_destino", "producto_reemplazo")
+            .prefetch_related("detalles__producto")
+            .order_by("created_at")
+        )
+        result = []
+        for d in devs:
+            productos = [
+                {"producto": det.producto.nombre, "cantidad": float(det.cantidad)}
+                for det in d.detalles.all()
+            ]
+            metodo = d.metodo_pago_diferencia if (d.tipo == "cambio" and d.metodo_pago_diferencia) else d.metodo_devolucion
+            result.append({
+                "id":                  d.id,
+                "venta_numero":        d.venta.numero_factura,
+                "tipo":                d.tipo,
+                "tipo_diferencia":     d.tipo_diferencia or "",
+                "total_devuelto":      float(d.total_devuelto),
+                "diferencia":          float(d.diferencia or 0),
+                "metodo":              metodo,
+                "cuenta_nombre":       d.cuenta_destino.nombre if d.cuenta_destino else None,
+                "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
+                "productos_devueltos": productos,
+            })
+        return result
 
     # ── Abonos ────────────────────────────────────────────────
 

@@ -46,6 +46,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
     producto_reemplazo_nombre = serializers.CharField(source="producto_reemplazo.nombre", read_only=True)
     precio_reemplazo = serializers.SerializerMethodField()
     subtotal_reemplazo = serializers.SerializerMethodField()
+    cuenta_destino_nombre = serializers.CharField(source="cuenta_destino.nombre", read_only=True)
 
     class Meta:
         model = Devolucion
@@ -64,6 +65,8 @@ class DevolucionSerializer(serializers.ModelSerializer):
             "diferencia",
             "tipo_diferencia",
             "metodo_pago_diferencia",
+            "cuenta_destino",
+            "cuenta_destino_nombre",
             "monto_recibido",
             "cambio_entregado",
             "estado", "observaciones",
@@ -76,6 +79,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
             "diferencia", "total_reemplazo",
             "tipo_diferencia", "metodo_pago_diferencia",
             "monto_recibido", "cambio_entregado",
+            "cuenta_destino_nombre",
         ]
 
     def get_empleado_nombre(self, obj):

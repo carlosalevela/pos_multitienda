@@ -118,6 +118,43 @@ class WhatsAppDestinatario(models.Model):
         return f"{self.nombre} ({self.numero})"
 
 
+class CuentaBancaria(models.Model):
+    TIPO_CHOICES = [
+        ("nequi",         "Nequi"),
+        ("daviplata",     "DaviPlata"),
+        ("tarjeta",       "Datáfono / Tarjeta"),
+        ("transferencia", "Transferencia Bancaria"),
+        ("otro",          "Otro"),
+    ]
+
+    empresa = models.ForeignKey(
+        "empresas.Empresa", on_delete=models.CASCADE,
+        related_name="cuentas_bancarias",
+    )
+    tienda = models.ForeignKey(
+        "tiendas.Tienda", on_delete=models.CASCADE,
+        related_name="cuentas_bancarias",
+        null=True, blank=True,
+        help_text="Null = disponible para todas las tiendas de la empresa.",
+    )
+    nombre  = models.CharField(max_length=100,
+                               help_text='Ej: "Nequi Carlos 312-456-7890"')
+    tipo    = models.CharField(max_length=20, choices=TIPO_CHOICES)
+    numero  = models.CharField(max_length=50, blank=True,
+                               help_text="Teléfono, últimos 4 dígitos, número de cuenta, etc.")
+    activo  = models.BooleanField(default=True)
+    orden   = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table        = "cuenta_bancaria"
+        ordering        = ["orden", "nombre"]
+        verbose_name    = "Cuenta Bancaria"
+        verbose_name_plural = "Cuentas Bancarias"
+
+    def __str__(self):
+        return f"{self.nombre} ({self.get_tipo_display()})"
+
+
 class ConfigImpresion(models.Model):
     PAPEL_CHOICES = [
         ("80mm", "Térmica 80mm"),

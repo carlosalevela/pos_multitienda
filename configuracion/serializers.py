@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import ConfigTienda, ConfigImpresion
+from .models import ConfigTienda, ConfigImpresion, CuentaBancaria
 
 METODOS_VALIDOS = {"efectivo", "tarjeta", "transferencia", "mixto"}
 
@@ -60,3 +60,12 @@ class ConfigImpresionSerializer(serializers.ModelSerializer):
         if value < 1 or value > 5:
             raise serializers.ValidationError("El número de copias debe estar entre 1 y 5.")
         return value
+
+
+class CuentaBancariaSerializer(serializers.ModelSerializer):
+    tipo_display = serializers.CharField(source="get_tipo_display", read_only=True)
+
+    class Meta:
+        model  = CuentaBancaria
+        fields = ["id", "nombre", "tipo", "tipo_display", "numero", "activo", "orden"]
+        read_only_fields = ["id", "tipo_display"]

@@ -68,7 +68,7 @@ class VentaSerializer(serializers.ModelSerializer):
             "sesion_caja", "cliente", "cliente_nombre",
             "empleado", "empleado_nombre",
             "subtotal", "descuento_total", "impuesto_total",
-            "total", "metodo_pago", "a_credito",
+            "total", "metodo_pago", "cuenta_destino", "a_credito",
             "monto_recibido", "vuelto",
             "estado", "observaciones",
             "created_at", "detalles", "pagos"

@@ -58,6 +58,14 @@ class Venta(models.Model):
     monto_recibido  = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     vuelto          = models.DecimalField(max_digits=12, decimal_places=2, default=0)
 
+    cuenta_destino  = models.ForeignKey(
+        "configuracion.CuentaBancaria",
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="ventas",
+        help_text="Cuenta Nequi/DaviPlata/Datáfono que recibió el pago.",
+    )
+
     a_credito       = models.BooleanField(default=False)
 
     estado          = models.CharField(

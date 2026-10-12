@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import ConfigTienda, ConfigImpresion, WhatsAppConfig, WhatsAppDestinatario
+from .models import ConfigTienda, ConfigImpresion, WhatsAppConfig, WhatsAppDestinatario, CuentaBancaria
 
 
 @admin.register(ConfigTienda)
@@ -29,3 +29,11 @@ class WhatsAppDestinatarioAdmin(admin.ModelAdmin):
     list_filter   = ["activo", "empresa"]
     search_fields = ["nombre", "numero"]
     filter_horizontal = ["tiendas"]
+
+
+@admin.register(CuentaBancaria)
+class CuentaBancariaAdmin(admin.ModelAdmin):
+    list_display  = ["nombre", "tipo", "numero", "tienda", "empresa", "activo", "orden"]
+    list_filter   = ["tipo", "activo", "empresa"]
+    search_fields = ["nombre", "numero"]
+    ordering      = ["empresa", "orden", "nombre"]

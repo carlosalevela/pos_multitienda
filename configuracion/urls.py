@@ -1,8 +1,13 @@
 from django.urls import path
-from .views import ConfigTiendaView, ConfigImpresionView, ConfigDefaultsView
+from .views import (ConfigTiendaView, ConfigImpresionView, ConfigDefaultsView,
+                    CuentaBancariaListView, CuentaBancariaDetailView, ResumenCuentasView)
 
 urlpatterns = [
-    path("defaults/",                    ConfigDefaultsView.as_view(),  name="config_defaults"),
-    path("tienda/<int:tienda_id>/",      ConfigTiendaView.as_view(),    name="config_tienda"),
-    path("impresion/<int:tienda_id>/",   ConfigImpresionView.as_view(), name="config_impresion"),
+    path("defaults/",                                         ConfigDefaultsView.as_view(),     name="config_defaults"),
+    path("tienda/<int:tienda_id>/",                           ConfigTiendaView.as_view(),        name="config_tienda"),
+    path("impresion/<int:tienda_id>/",                        ConfigImpresionView.as_view(),     name="config_impresion"),
+    # Cuentas bancarias / Nequi / DaviPlata
+    path("cuentas/<int:tienda_id>/",                          CuentaBancariaListView.as_view(),  name="cuentas_list"),
+    path("cuentas/<int:tienda_id>/resumen/",                  ResumenCuentasView.as_view(),      name="cuentas_resumen"),
+    path("cuentas/<int:tienda_id>/<int:cuenta_id>/",          CuentaBancariaDetailView.as_view(),name="cuentas_detail"),
 ]

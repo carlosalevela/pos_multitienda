@@ -1,12 +1,15 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from django.db import models
+from django.db.models import Sum
 
 from core.permissions import es_superadmin, get_empresa
 from tiendas.models import Tienda
 
-from .models import ConfigTienda, ConfigImpresion, METODOS_PAGO_DEFAULT
-from .serializers import ConfigTiendaSerializer, ConfigImpresionSerializer
+from .models import ConfigTienda, ConfigImpresion, CuentaBancaria, METODOS_PAGO_DEFAULT
+from .serializers import (ConfigTiendaSerializer, ConfigImpresionSerializer,
+                           CuentaBancariaSerializer)
 
 
 def _get_tienda(request, tienda_id):
@@ -130,3 +133,137 @@ class ConfigDefaultsView(APIView):
             "mostrar_nit":         True,
             "mensaje_pie":         "",
         })
+
+
+# ── Cuentas Bancarias / Nequi / DaviPlata ────────────────────
+
+class CuentaBancariaListView(APIView):
+    """
+    GET  /api/config/cuentas/<tienda_id>/  → lista activas de la tienda
+    POST /api/config/cuentas/<tienda_id>/  → crear nueva (admin/supervisor)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, tienda_id):
+        tienda, err = _get_tienda(request, tienda_id)
+        if err:
+            return err
+        qs = CuentaBancaria.objects.filter(
+            empresa=tienda.empresa,
+            activo=True,
+        ).filter(
+            models.Q(tienda=tienda) | models.Q(tienda__isnull=True)
+        )
+        return Response(CuentaBancariaSerializer(qs, many=True).data)
+
+    def post(self, request, tienda_id):
+        if not _puede_editar(request):
+            return Response({"error": "No tienes permiso."}, status=403)
+        tienda, err = _get_tienda(request, tienda_id)
+        if err:
+            return err
+        s = CuentaBancariaSerializer(data=request.data)
+        if not s.is_valid():
+            return Response(s.errors, status=400)
+        s.save(empresa=tienda.empresa, tienda=tienda)
+        return Response(s.data, status=201)
+
+
+class CuentaBancariaDetailView(APIView):
+    """
+    PATCH  /api/config/cuentas/<tienda_id>/<cuenta_id>/  → editar
+    DELETE /api/config/cuentas/<tienda_id>/<cuenta_id>/  → desactivar
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _get_cuenta(self, request, tienda_id, cuenta_id):
+        tienda, err = _get_tienda(request, tienda_id)
+        if err:
+            return None, None, err
+        try:
+            cuenta = CuentaBancaria.objects.get(pk=cuenta_id, empresa=tienda.empresa)
+        except CuentaBancaria.DoesNotExist:
+            return None, None, Response({"error": "Cuenta no encontrada."}, status=404)
+        return tienda, cuenta, None
+
+    def patch(self, request, tienda_id, cuenta_id):
+        if not _puede_editar(request):
+            return Response({"error": "No tienes permiso."}, status=403)
+        _, cuenta, err = self._get_cuenta(request, tienda_id, cuenta_id)
+        if err:
+            return err
+        s = CuentaBancariaSerializer(cuenta, data=request.data, partial=True)
+        if not s.is_valid():
+            return Response(s.errors, status=400)
+        s.save()
+        return Response(s.data)
+
+    def delete(self, request, tienda_id, cuenta_id):
+        if not _puede_editar(request):
+            return Response({"error": "No tienes permiso."}, status=403)
+        _, cuenta, err = self._get_cuenta(request, tienda_id, cuenta_id)
+        if err:
+            return err
+        cuenta.activo = False
+        cuenta.save(update_fields=["activo"])
+        return Response(status=204)
+
+
+class ResumenCuentasView(APIView):
+    """
+    GET /api/config/cuentas/<tienda_id>/resumen/?sesion_id=X
+    Retorna por cuenta: total de esa sesión + acumulado histórico (ventas completadas).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, tienda_id):
+        from ventas.models import Venta
+
+        tienda, err = _get_tienda(request, tienda_id)
+        if err:
+            return err
+
+        sesion_id = request.query_params.get("sesion_id")
+
+        cuentas = CuentaBancaria.objects.filter(
+            empresa=tienda.empresa,
+        ).filter(
+            models.Q(tienda=tienda) | models.Q(tienda__isnull=True)
+        )
+
+        base_ventas = Venta.objects.filter(
+            tienda=tienda, estado="completada",
+            cuenta_destino__isnull=False,
+        )
+
+        sesion_totals = {}
+        if sesion_id:
+            for row in (base_ventas
+                        .filter(sesion_caja_id=sesion_id)
+                        .values("cuenta_destino_id")
+                        .annotate(t=Sum("total"))):
+                sesion_totals[row["cuenta_destino_id"]] = float(row["t"] or 0)
+
+        acum_totals = {}
+        for row in (base_ventas
+                    .values("cuenta_destino_id")
+                    .annotate(t=Sum("total"))):
+            acum_totals[row["cuenta_destino_id"]] = float(row["t"] or 0)
+
+        result = []
+        for c in cuentas:
+            sesion_t = sesion_totals.get(c.id, 0)
+            acum_t   = acum_totals.get(c.id, 0)
+            if sesion_t == 0 and acum_t == 0:
+                continue
+            result.append({
+                "id":             c.id,
+                "nombre":         c.nombre,
+                "tipo":           c.tipo,
+                "tipo_display":   c.get_tipo_display(),
+                "numero":         c.numero,
+                "sesion_total":   sesion_t,
+                "total_acumulado": acum_t,
+            })
+
+        return Response(result)

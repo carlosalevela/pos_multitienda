@@ -32,7 +32,7 @@ class Producto(models.Model):
     imagen              = models.ImageField(
         upload_to="productos/", null=True, blank=True)
     codigo_barras       = models.CharField(
-        max_length=50, unique=True, blank=True, null=True)
+        max_length=50, blank=True, null=True)
     precio_compra       = models.DecimalField(
         max_digits=12, decimal_places=2, default=0)
     precio_venta        = models.DecimalField(

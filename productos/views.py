@@ -488,9 +488,12 @@ class ImportarProductosView(APIView):
         "stock_minimo":     "stock_minimo",
         "stock mínimo":     "stock_minimo",
         "stock minimo":     "stock_minimo",
-        "stock_maximo":     "stock_maximo",
-        "stock máximo":     "stock_maximo",
-        "stock maximo":     "stock_maximo",
+        "stock_maximo":         "stock_maximo",
+        "stock máximo":         "stock_maximo",
+        "stock maximo":         "stock_maximo",
+        "nombre del producto":  "nombre",
+        "nombre producto":      "nombre",
+        "product name":         "nombre",
     }
 
     def _parsear_excel(self, archivo):
@@ -505,26 +508,37 @@ class ImportarProductosView(APIView):
         if not filas:
             raise ValueError("El archivo Excel está vacío.")
 
-        raw_headers = [
-            str(h).strip().lower() if h is not None else ""
-            for h in filas[0]
-        ]
-
-        field_indices = {}
-        for idx, h in enumerate(raw_headers):
-            campo = self._COLUMN_MAP.get(h)
-            if campo and campo not in field_indices:
-                field_indices[campo] = idx
+        # Buscar la fila de cabecera en las primeras 6 filas
+        # (el Excel exportado tiene 2 filas de metadata antes de los encabezados)
+        header_row_idx = 0
+        field_indices  = {}
+        for attempt in range(min(6, len(filas))):
+            raw_headers = [
+                str(h).strip().lower() if h is not None else ""
+                for h in filas[attempt]
+            ]
+            indices = {}
+            for idx, h in enumerate(raw_headers):
+                campo = self._COLUMN_MAP.get(h)
+                if campo and campo not in indices:
+                    indices[campo] = idx
+            if "nombre" in indices:
+                header_row_idx = attempt
+                field_indices  = indices
+                break
 
         if "nombre" not in field_indices:
-            cols = ", ".join(h for h in raw_headers if h)
+            cols = ", ".join(
+                str(h).strip().lower()
+                for h in filas[0] if h is not None
+            )
             raise ValueError(
                 f"Columna 'nombre' no encontrada. "
                 f"Columnas detectadas: {cols or '(ninguna)'}"
             )
 
         productos = []
-        for fila in filas[1:]:
+        for fila in filas[header_row_idx + 1:]:
             if all(v is None or str(v).strip() == "" for v in fila):
                 continue
             item = {}

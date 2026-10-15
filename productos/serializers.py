@@ -178,7 +178,7 @@ class InventarioSerializer(serializers.ModelSerializer):
 
 
 class AjusteInventarioSerializer(serializers.Serializer):
-    tipo        = serializers.ChoiceField(choices=["entrada", "salida", "ajuste"])
+    tipo        = serializers.ChoiceField(choices=["entrada", "salida", "ajuste", "averia"])
     cantidad    = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
     observacion = serializers.CharField(required=False, allow_blank=True)
 

@@ -1,3 +1,4 @@
+from django.db.models.deletion import ProtectedError
 from rest_framework import generics
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -62,6 +63,24 @@ class TiendaDetailView(generics.RetrieveUpdateDestroyAPIView):
 
     def destroy(self, request, *args, **kwargs):
         tienda = self.get_object()
+
+        if request.query_params.get("eliminar") == "true":
+            nombre = tienda.nombre
+            try:
+                tienda.delete()
+                return Response(
+                    {"detail": f"Tienda '{nombre}' eliminada permanentemente."},
+                    status=200,
+                )
+            except ProtectedError:
+                return Response(
+                    {"error": (
+                        "No se puede eliminar esta tienda porque tiene ventas o "
+                        "devoluciones registradas. Puedes desactivarla en su lugar."
+                    )},
+                    status=400,
+                )
+
         tienda.activo = False
         tienda.save(update_fields=["activo"])
         return Response(

@@ -115,16 +115,22 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         elif activo == "false":
             qs = qs.filter(activo=False)
 
-        categoria = self.request.query_params.get("categoria")
-        buscar    = self.request.query_params.get("q")
-        tienda_id = self.request.query_params.get("tienda_id")
+        categoria  = self.request.query_params.get("categoria")
+        buscar     = self.request.query_params.get("q")
+        tienda_id  = self.request.query_params.get("tienda_id")
+        precio_min = self.request.query_params.get("precio_min")
+        precio_max = self.request.query_params.get("precio_max")
 
-        if categoria: qs = qs.filter(categoria_id=categoria)
+        if categoria:  qs = qs.filter(categoria_id=categoria)
+        if precio_min: qs = qs.filter(precio_venta__gte=precio_min)
+        if precio_max: qs = qs.filter(precio_venta__lte=precio_max)
         if buscar:
-            qs = qs.filter(
-                Q(nombre__icontains=buscar) |
-                Q(codigo_barras__icontains=buscar)
-            )
+            q_filter = Q(nombre__icontains=buscar) | Q(codigo_barras__icontains=buscar)
+            try:
+                q_filter |= Q(precio_venta=float(buscar))
+            except ValueError:
+                pass
+            qs = qs.filter(q_filter)
         if tienda_id:
             empresa_filter = {} if es_superadmin(self.request) else \
                 {"inventarios__tienda__empresa": get_empresa(self.request)}
@@ -287,16 +293,20 @@ class BuscarProductoPOSView(APIView):
             return Response(
                 {"error": "Ingresa un término de búsqueda."}, status=400)
 
+        filtro_q = Q(codigo_barras=q) | Q(nombre__icontains=q)
+        try:
+            precio = float(q.replace(",", "").replace(".", ""))
+            filtro_q |= Q(precio_venta=precio)
+        except ValueError:
+            pass
+
         if es_superadmin(request):
             productos = Producto.objects.select_related("empresa").filter(
-                Q(codigo_barras=q) | Q(nombre__icontains=q),
-                activo=True,
+                filtro_q, activo=True,
             )[:10]
         else:
             productos = Producto.objects.select_related("empresa").filter(
-                Q(codigo_barras=q) | Q(nombre__icontains=q),
-                activo=True,
-                empresa=get_empresa(request),
+                filtro_q, activo=True, empresa=get_empresa(request),
             )[:10]
 
         data = []
@@ -332,17 +342,28 @@ class InventarioListView(generics.ListAPIView):
         alerta     = self.request.query_params.get("alerta")
         activo     = self.request.query_params.get("activo", "true")
         categoria  = self.request.query_params.get("categoria")
+        q          = self.request.query_params.get("q")
+        precio_min = self.request.query_params.get("precio_min")
+        precio_max = self.request.query_params.get("precio_max")
 
         if activo == "true":    qs = qs.filter(producto__activo=True)
         elif activo == "false": qs = qs.filter(producto__activo=False)
         if tienda_id:  qs = qs.filter(tienda_id=tienda_id)
         if categoria:  qs = qs.filter(producto__categoria_id=categoria)
+        if q:          qs = qs.filter(
+            Q(producto__nombre__icontains=q) |
+            Q(producto__codigo_barras__icontains=q)
+        )
+        if precio_min: qs = qs.filter(producto__precio_venta__gte=precio_min)
+        if precio_max: qs = qs.filter(producto__precio_venta__lte=precio_max)
         if alerta == "bajo":
             qs = qs.filter(
                 stock_actual__lte=F("stock_minimo"),
                 stock_actual__gt=0)
         elif alerta == "agotado":
             qs = qs.filter(stock_actual__lte=0)
+        elif alerta == "con_averias":
+            qs = qs.filter(stock_averias__gt=0)
 
         return qs
 
@@ -379,20 +400,28 @@ class AjustarInventarioView(APIView):
             inv.stock_actual -= cantidad
         elif tipo == "ajuste":
             inv.stock_actual = cantidad
+        elif tipo == "averia":
+            if inv.stock_actual < cantidad:
+                return Response(
+                    {"error": "Stock insuficiente para registrar avería."}, status=400)
+            inv.stock_actual  -= cantidad
+            inv.stock_averias += cantidad
 
         inv.save()
 
+        tipo_mov = "dano" if tipo == "averia" else tipo
         MovimientoInventario.objects.create(
             producto_id=producto_id, tienda_id=tienda_id,
             empleado=request.user,
-            tipo=tipo, cantidad=cantidad,
+            tipo=tipo_mov, cantidad=cantidad,
             referencia_tipo="manual", observacion=observacion,
         )
 
         return Response({
-            "detail":       "Stock actualizado correctamente.",
-            "stock_actual": float(inv.stock_actual),
-            "tipo":         tipo,
+            "detail":        "Stock actualizado correctamente.",
+            "stock_actual":  float(inv.stock_actual),
+            "stock_averias": float(inv.stock_averias),
+            "tipo":          tipo,
         })
 
 
@@ -1281,6 +1310,116 @@ class ExportarInventarioView(APIView):
                         c.number_format = fmt
 
             ws3.freeze_panes = "A4"
+
+        # ── Hoja 4: Ajustes manuales + transferencias ─────────
+        ajustes_qs = MovimientoInventario.objects.filter(
+            referencia_tipo__in=["manual", "transferencia"],
+        ).select_related("producto", "tienda", "empleado")
+        if not es_superadmin(request):
+            ajustes_qs = ajustes_qs.filter(tienda__empresa=get_empresa(request))
+        if tienda_id:
+            ajustes_qs = ajustes_qs.filter(tienda_id=tienda_id)
+        ajustes = list(ajustes_qs.order_by("-created_at")[:500])
+
+        if ajustes:
+            C_TEAL   = "117A65"
+            C_TEAL_M = "1ABC9C"
+            C_TEAL_L = "D1F2EB"
+
+            _origen_label = {
+                ("manual",        "entrada"): "Entrada manual",
+                ("manual",        "salida"):  "Salida manual",
+                ("manual",        "ajuste"):  "Ajuste manual",
+                ("manual",        "dano"):    "Avería manual",
+                ("transferencia", "entrada"): "Transferencia entrada",
+                ("transferencia", "salida"):  "Transferencia salida",
+            }
+            _origen_color = {
+                "Entrada manual":        Font(name="Calibri", bold=True, size=10, color="1E8449"),
+                "Salida manual":         Font(name="Calibri", bold=True, size=10, color="C0392B"),
+                "Ajuste manual":         Font(name="Calibri", bold=True, size=10, color="9A7D0A"),
+                "Avería manual":         Font(name="Calibri", bold=True, size=10, color="784212"),
+                "Transferencia entrada": Font(name="Calibri", bold=True, size=10, color="1A5276"),
+                "Transferencia salida":  Font(name="Calibri", bold=True, size=10, color="6C3483"),
+            }
+
+            ws4 = wb.create_sheet(title="Ajustes y Transferencias")
+
+            COL_AJ = [
+                ("#",             5, "center"),
+                ("Fecha",        18, "center"),
+                ("Producto",     32, "left"),
+                ("Tienda",       20, "left"),
+                ("Empleado",     22, "left"),
+                ("Origen",       22, "center"),
+                ("Cantidad",     12, "right"),
+                ("Observación",  40, "left"),
+            ]
+            N4      = len(COL_AJ)
+            ultima4 = get_column_letter(N4)
+
+            ws4.row_dimensions[1].height = 32
+            ws4.merge_cells(f"A1:{ultima4}1")
+            c = ws4["A1"]
+            c.value     = f"AJUSTES MANUALES Y TRANSFERENCIAS  —  {empresa_nombre.upper()}"
+            c.font      = Font(name="Calibri", bold=True, size=16, color="FFFFFF")
+            c.fill      = PatternFill("solid", fgColor=C_TEAL)
+            c.alignment = ac
+
+            ws4.row_dimensions[2].height = 20
+            ws4.merge_cells(f"A2:{ultima4}2")
+            c = ws4["A2"]
+            c.value = (
+                f"Generado: {now.strftime('%d/%m/%Y %H:%M')}  |  "
+                f"{tienda_label}  |  Últimos {len(ajustes)} registros"
+            )
+            c.font      = Font(name="Calibri", bold=True, size=11, color="FFFFFF")
+            c.fill      = PatternFill("solid", fgColor=C_TEAL_M)
+            c.alignment = ac
+
+            ws4.row_dimensions[3].height = 22
+            for i, (nombre_col, ancho, _) in enumerate(COL_AJ, start=1):
+                ws4.column_dimensions[get_column_letter(i)].width = ancho
+                c = ws4.cell(row=3, column=i, value=nombre_col)
+                c.font      = Font(name="Calibri", bold=True, size=10, color="FFFFFF")
+                c.fill      = PatternFill("solid", fgColor=C_TEAL)
+                c.alignment = ac
+                c.border    = border()
+
+            for num, aj in enumerate(ajustes, start=1):
+                fila4 = num + 3
+                ws4.row_dimensions[fila4].height = 16
+                empleado_nombre = (
+                    f"{aj.empleado.nombre} {aj.empleado.apellido}"
+                    if aj.empleado else "—"
+                )
+                fondo4  = PatternFill("solid", fgColor=C_TEAL_L) if num % 2 == 0 else None
+                origen  = _origen_label.get((aj.referencia_tipo, aj.tipo), aj.tipo.capitalize())
+                fuente_origen = _origen_color.get(origen, f_normal)
+                celdas4 = [
+                    (num,                                       "center", f_normal,      None),
+                    (aj.created_at.strftime("%d/%m/%Y %H:%M"), "center", f_normal,      None),
+                    (aj.producto.nombre,                        "left",   f_bold,        None),
+                    (aj.tienda.nombre,                          "left",   f_normal,      None),
+                    (empleado_nombre,                           "left",   f_normal,      None),
+                    (origen,                                    "center", fuente_origen, None),
+                    (float(aj.cantidad),                        "right",  fuente_origen, "#,##0.00"),
+                    (aj.observacion or "—",                     "left",   f_normal,      None),
+                ]
+                for col_idx, (val_c, alin, fuente, fmt) in enumerate(celdas4, start=1):
+                    c = ws4.cell(row=fila4, column=col_idx, value=val_c)
+                    c.font      = fuente
+                    c.border    = border()
+                    c.alignment = (
+                        ac if alin == "center" else
+                        ar if alin == "right"  else al
+                    )
+                    if fondo4:
+                        c.fill = fondo4
+                    if fmt:
+                        c.number_format = fmt
+
+            ws4.freeze_panes = "A4"
 
         fecha_str = now.strftime("%Y%m%d_%H%M")
         response  = HttpResponse(

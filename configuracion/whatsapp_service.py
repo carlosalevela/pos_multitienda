@@ -14,8 +14,9 @@ def _fmt(v):
     return f"${int(v):,}".replace(",", ".")
 
 
-def _fila(label: str, valor: float) -> str:
-    return f"  {label:<18}{_fmt(valor)}"
+def _seg(label: str, valor: float) -> str:
+    """Segmento inline sin espacios extra: 'Label: $valor'"""
+    return f"{label} {_fmt(valor)}"
 
 
 def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
@@ -23,69 +24,75 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     Plantilla cierre_turno:
       Header → {{1}} tienda
       Body   → {{1}} colaborador | {{2}} fecha | {{3}} detalle financiero | {{4}} cuadre
+    NOTA: parámetros deben ser una sola línea sin saltos ni >4 espacios seguidos.
     """
-    v     = datos["ventas"]
-    gastos  = datos.get("total_gastos", 0)
+    v        = datos["ventas"]
+    gastos   = datos.get("total_gastos", 0)
     esperado = datos["monto_esperado"]
-    dif   = datos["diferencia"]
-    sep   = datos.get("abonos_separados", {})
-    dev   = datos.get("devoluciones_neto_ef", 0)
-    ini   = datos.get("monto_inicial", 0)
-    cred  = datos.get("credito_efectivo", 0)
-    canc  = datos.get("cancelaciones_efectivo", 0)
-    ing_m = datos.get("ingresos_manual", 0)
+    contado  = datos.get("monto_contado", 0)
+    dif      = datos["diferencia"]
+    sep      = datos.get("abonos_separados", {})
+    dev      = datos.get("devoluciones_neto_ef", 0)
+    ini      = datos.get("monto_inicial", 0)
+    cred     = datos.get("credito_efectivo", 0)
+    canc     = datos.get("cancelaciones_efectivo", 0)
+    ing_m    = datos.get("ingresos_manual", 0)
 
-    # ── Ventas ──
-    lineas = [f"VENTAS ({v['num_transacciones']} transacciones)"]
-    lineas.append(_fila("Efectivo:", v["efectivo"]))
+    # ── Ventas del turno por método ──
+    ef_ventas = v.get("efectivo", 0)
+    partes_metodos = []
+    if ef_ventas:
+        partes_metodos.append(_seg("Efec:", ef_ventas))
     if v.get("tarjeta", 0):
-        lineas.append(_fila("Datáfono:", v["tarjeta"]))
+        partes_metodos.append(_seg("Tarj:", v["tarjeta"]))
     if v.get("transferencia", 0):
-        lineas.append(_fila("Transferencia:", v["transferencia"]))
+        partes_metodos.append(_seg("Transf:", v["transferencia"]))
     if v.get("mixto", 0):
-        lineas.append(_fila("Mixto:", v["mixto"]))
-    lineas.append(_fila("TOTAL ventas:", v["total"]))
+        partes_metodos.append(_seg("Mixto:", v["mixto"]))
 
-    # ── Separados / créditos ──
+    total_ventas_str = _seg("TOTAL VENTAS:", v["total"])
+    metodos_str = " | ".join(partes_metodos)
+
+    # ── Ingresos y egresos adicionales ──
     sep_total = sep.get("total", 0)
     sep_cant  = sep.get("cantidad", 0)
-    if sep_total or cred or canc or ing_m:
-        lineas.append("")
-        lineas.append("INGRESOS ADICIONALES")
-        if sep_total:
-            lineas.append(_fila(f"Separados ({sep_cant}):", sep_total))
-        if cred:
-            lineas.append(_fila("Abonos crédito:", cred))
-        if canc:
-            lineas.append(_fila("Cancelaciones:", canc))
-        if ing_m:
-            lineas.append(_fila("Ingresos manual:", ing_m))
+    extras = []
+    if sep_total:
+        extras.append(_seg(f"Separados({sep_cant}):", sep_total))
+    if cred:
+        extras.append(_seg("Credito:", cred))
+    if canc:
+        extras.append(_seg("Cancelac:", canc))
+    if ing_m:
+        extras.append(_seg("Ingresos:", ing_m))
+    if dev:
+        extras.append(_seg("Devoluc:", dev))
+    if gastos:
+        extras.append(_seg("Gastos:", gastos))
 
-    # ── Devoluciones y gastos ──
-    if dev or gastos:
-        lineas.append("")
-        lineas.append("EGRESOS")
-        if dev:
-            lineas.append(_fila("Devoluciones:", dev))
-        if gastos:
-            lineas.append(_fila("Gastos:", gastos))
+    partes = [f"{v['num_transacciones']} transac.", metodos_str, total_ventas_str]
+    if extras:
+        partes.append("+" + " | ".join(extras))
+    resumen = " -- ".join(p for p in partes if p)
 
-    resumen = "\n".join(lineas)
-
-    # ── Cuadre ──
+    # ── Cuadre de efectivo ──
     if dif == 0:
-        estado_dif = "✅ Cuadre exacto"
+        estado_dif = "Cuadre exacto"
     elif dif < 0:
-        estado_dif = f"❌ Faltante: {_fmt(abs(dif))}"
+        estado_dif = f"FALTANTE: {_fmt(abs(dif))}"
     else:
-        estado_dif = f"⚠️ Sobrante: {_fmt(dif)}"
+        estado_dif = f"SOBRANTE: {_fmt(dif)}"
 
-    cuadre_lineas = []
+    cuadre_partes = []
     if ini:
-        cuadre_lineas.append(_fila("Base caja:", ini))
-    cuadre_lineas.append(_fila("Ef. esperado:", esperado))
-    cuadre_lineas.append(estado_dif)
-    cuadre = "\n".join(cuadre_lineas)
+        cuadre_partes.append(_seg("Base:", ini))
+    if ef_ventas:
+        cuadre_partes.append(_seg("+Ventas ef:", ef_ventas))
+    cuadre_partes.append(_seg("=Esperado:", esperado))
+    if contado:
+        cuadre_partes.append(_seg("Contado:", contado))
+    cuadre_partes.append(estado_dif)
+    cuadre = " | ".join(cuadre_partes)
 
     header_params = [datos["tienda_nombre"]]
     body_params   = [

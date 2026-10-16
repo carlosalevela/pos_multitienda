@@ -171,7 +171,7 @@ class CerrarCajaView(APIView):
             _num_v         = base_v_total.count()
 
             from django.utils import timezone as _tz
-            _fecha = sesion.fecha_cierre or _tz.now()
+            _fecha = _tz.localtime(sesion.fecha_cierre or _tz.now())
             _meses = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
                       "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
             _fecha_str = (
@@ -193,7 +193,7 @@ class CerrarCajaView(APIView):
                     "fecha_cierre":       _fecha_str,
                     "monto_inicial":      float(sesion.monto_inicial),
                     "ventas": {
-                        "total":             float(total_ventas),
+                        "total":             float(_v_ef + _v_tar + _v_tra + _v_mix),
                         "efectivo":          float(_v_ef),
                         "tarjeta":           float(_v_tar),
                         "transferencia":     float(_v_tra),
@@ -210,6 +210,7 @@ class CerrarCajaView(APIView):
                     "devoluciones_neto_ef":   float(neto_dev_efectivo),
                     "total_gastos":           float(total_gastos),
                     "monto_esperado":         float(monto_sistema),
+                    "monto_contado":          float(sesion.monto_final_real or 0),
                     "diferencia":             float(diferencia),
                 },
             )
@@ -379,7 +380,7 @@ class ResumenCierreView(APIView):
         # Ventas detalle (productos por transacción)
         ventas_detalle = []
         for v in base_v.select_related("cliente", "empleado").prefetch_related("detalles__producto").order_by("created_at"):
-            hora = v.created_at.strftime("%H:%M") if v.created_at else ""
+            hora = timezone.localtime(v.created_at).strftime("%H:%M") if v.created_at else ""
             cliente = ""
             if v.cliente:
                 cliente = f"{v.cliente.nombre} {getattr(v.cliente, 'apellido', '')}".strip()

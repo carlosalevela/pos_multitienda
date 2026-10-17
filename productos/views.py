@@ -749,11 +749,16 @@ class DashboardInventarioView(APIView):
             referencia_tipo="recuperacion_averia"
         ).aggregate(total=Sum("cantidad"))["total"] or 0
 
-        perdidas_brutas = mov_mes.filter(
-            tipo="dano"
-        ).select_related("producto").aggregate(
+        # Solo movimientos de avería inicial (excluir descarte para no contar doble)
+        averias_qs = mov_mes.filter(tipo="dano").exclude(
+            referencia_tipo="descarte_averia"
+        )
+        perdidas_brutas = averias_qs.select_related("producto").aggregate(
             valor=Sum(F("cantidad") * F("producto__precio_compra"))
         )["valor"] or 0
+        perdidas_cantidad = averias_qs.aggregate(
+            total=Sum("cantidad")
+        )["total"] or 0
 
         recuperado = mov_mes.filter(
             referencia_tipo="recuperacion_averia"
@@ -775,6 +780,7 @@ class DashboardInventarioView(APIView):
             "ingresos_mes_unidades":     float(ingresos_mes),
             "productos_registrados_mes": productos_mes,
             "perdidas_mes_valor":        float(perdidas_valor),
+            "perdidas_mes_cantidad":     int(perdidas_cantidad),
         })
 
 

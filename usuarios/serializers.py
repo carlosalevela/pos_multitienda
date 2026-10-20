@@ -107,7 +107,28 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenSerializer(TokenObtainPairSerializer):
-    """JWT con datos extra del empleado en el token"""
+    """JWT con datos extra del empleado en el token. Acepta email o cédula."""
+
+    def validate(self, attrs):
+        identificador = attrs.get("email", "").strip()
+
+        if identificador and "@" not in identificador:
+            # Sin '@' → asumir cédula
+            empleados = Empleado.objects.filter(
+                cedula=identificador, activo=True
+            )
+            count = empleados.count()
+            if count == 0:
+                raise serializers.ValidationError(
+                    {"email": "No se encontró un usuario activo con esa cédula."}
+                )
+            if count > 1:
+                raise serializers.ValidationError(
+                    {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
+                )
+            attrs["email"] = empleados.first().email
+
+        return super().validate(attrs)
 
     @classmethod
     def get_token(cls, user):

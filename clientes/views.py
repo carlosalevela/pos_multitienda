@@ -12,8 +12,8 @@ from rest_framework.views import APIView
 
 from caja.models import SesionCaja, MovimientoCaja
 from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa, scope_qs
-from productos.models import Inventario, MovimientoInventario
-from .models import Cliente, Separado, AbonoSeparado, TierConfig
+from productos.models import Inventario, MovimientoInventario, Producto
+from .models import Cliente, Separado, AbonoSeparado, DetalleSeparado, TierConfig
 from .serializers import ClienteSerializer, ClienteSimpleSerializer, SeparadoSerializer, TierConfigSerializer
 
 
@@ -437,6 +437,155 @@ class CancelarSeparadoView(APIView):
                 {"producto": d.producto.nombre, "cantidad": float(d.cantidad)}
                 for d in separado.detalles.all()
             ],
+        })
+
+
+# ── Cambiar producto de un separado activo ────────────────
+class CambiarProductoSeparadoView(APIView):
+    permission_classes = [EsAdminOSupervisor]
+
+    @transaction.atomic
+    def post(self, request, pk):
+        filtro = {"pk": pk}
+        if not es_superadmin(request):
+            filtro["tienda__empresa"] = get_empresa(request)
+        try:
+            separado = Separado.objects.select_for_update().prefetch_related(
+                "detalles__producto"
+            ).get(**filtro)
+        except Separado.DoesNotExist:
+            return Response({"error": "Separado no encontrado."}, status=404)
+
+        if separado.estado != "activo":
+            return Response(
+                {"error": f"Este separado está {separado.estado} y no se puede modificar."},
+                status=400)
+
+        detalle_id        = request.data.get("detalle_id")
+        nuevo_producto_id = request.data.get("nuevo_producto_id")
+
+        if not detalle_id or not nuevo_producto_id:
+            return Response(
+                {"error": "detalle_id y nuevo_producto_id son requeridos."}, status=400)
+
+        try:
+            detalle = separado.detalles.get(pk=detalle_id)
+        except DetalleSeparado.DoesNotExist:
+            return Response(
+                {"error": "Detalle no encontrado en este separado."}, status=404)
+
+        try:
+            nuevo_producto = Producto.objects.get(pk=nuevo_producto_id)
+        except Producto.DoesNotExist:
+            return Response({"error": "Producto no encontrado."}, status=404)
+
+        try:
+            nueva_cantidad = Decimal(str(
+                request.data.get("nueva_cantidad", detalle.cantidad)))
+            nuevo_precio   = Decimal(str(
+                request.data.get("nuevo_precio_unitario", nuevo_producto.precio)))
+        except (InvalidOperation, TypeError):
+            return Response(
+                {"error": "Cantidad o precio inválido."}, status=400)
+
+        if nueva_cantidad <= 0:
+            return Response(
+                {"error": "La cantidad debe ser mayor a cero."}, status=400)
+
+        # ── Restaurar stock del producto anterior ─────────
+        old_inv, _ = Inventario.objects.select_for_update().get_or_create(
+            producto = detalle.producto,
+            tienda   = separado.tienda,
+            defaults = {"stock_actual": 0, "stock_minimo": 0, "stock_maximo": 0},
+        )
+        old_inv.stock_actual += detalle.cantidad
+        old_inv.save(update_fields=["stock_actual"])
+
+        MovimientoInventario.objects.create(
+            producto        = detalle.producto,
+            tienda          = separado.tienda,
+            empleado        = _get_empleado(request),
+            tipo            = "entrada",
+            cantidad        = detalle.cantidad,
+            referencia_tipo = "cambio_separado",
+            referencia_id   = separado.id,
+            observacion     = (
+                f"Cambio separado #{separado.id} — "
+                f"restaurando '{detalle.producto.nombre}'"
+            ),
+        )
+
+        # ── Validar y reservar stock del nuevo producto ───
+        try:
+            new_inv = Inventario.objects.select_for_update().get(
+                producto = nuevo_producto, tienda = separado.tienda)
+        except Inventario.DoesNotExist:
+            return Response({
+                "error": (
+                    f"'{nuevo_producto.nombre}' no tiene inventario "
+                    f"registrado en esta tienda."
+                )
+            }, status=400)
+
+        if new_inv.stock_actual < nueva_cantidad:
+            return Response({
+                "error": (
+                    f"Stock insuficiente para '{nuevo_producto.nombre}'. "
+                    f"Disponible: {new_inv.stock_actual}, "
+                    f"requerido: {nueva_cantidad}."
+                )
+            }, status=400)
+
+        new_inv.stock_actual -= nueva_cantidad
+        new_inv.save(update_fields=["stock_actual"])
+
+        MovimientoInventario.objects.create(
+            producto        = nuevo_producto,
+            tienda          = separado.tienda,
+            empleado        = _get_empleado(request),
+            tipo            = "salida",
+            cantidad        = nueva_cantidad,
+            referencia_tipo = "cambio_separado",
+            referencia_id   = separado.id,
+            observacion     = (
+                f"Cambio separado #{separado.id} — "
+                f"reservando '{nuevo_producto.nombre}'"
+            ),
+        )
+
+        # ── Actualizar detalle ────────────────────────────
+        old_subtotal   = detalle.subtotal
+        nuevo_subtotal = nueva_cantidad * nuevo_precio
+
+        detalle.producto        = nuevo_producto
+        detalle.cantidad        = nueva_cantidad
+        detalle.precio_unitario = nuevo_precio
+        detalle.subtotal        = nuevo_subtotal
+        detalle.save()
+
+        # ── Recalcular totales del separado ───────────────
+        diff = nuevo_subtotal - old_subtotal
+        separado.total          += diff
+        separado.saldo_pendiente = max(
+            Decimal("0"),
+            separado.total - separado.abono_acumulado,
+        )
+        separado.save()
+
+        return Response({
+            "detail": (
+                f"Producto cambiado a '{nuevo_producto.nombre}' "
+                f"×{nueva_cantidad}."
+            ),
+            "total":              float(separado.total),
+            "saldo_pendiente":    float(separado.saldo_pendiente),
+            "abono_acumulado":    float(separado.abono_acumulado),
+            "detalle_id":         detalle.pk,
+            "nuevo_producto_id":  nuevo_producto.id,
+            "nuevo_producto_nombre": nuevo_producto.nombre,
+            "nueva_cantidad":     float(nueva_cantidad),
+            "nuevo_precio":       float(nuevo_precio),
+            "nuevo_subtotal":     float(nuevo_subtotal),
         })
 
 

@@ -3,7 +3,7 @@ from .views import (
     ClienteListCreateView, ClienteDetailView, ClienteSimpleListView,
     ClienteResumenView, CreditosClienteView,
     SeparadoListCreateView, SeparadoDetailView,
-    AbonarSeparadoView, CancelarSeparadoView,
+    AbonarSeparadoView, CancelarSeparadoView, CambiarProductoSeparadoView,
     AlertasSeparadosView, AbonosPorFechaView,
     TierConfigListCreateView, TierConfigDetailView,
 )
@@ -28,5 +28,6 @@ urlpatterns = [
     # ── Separados — rutas dinámicas con <int:pk> ──────────────
     path("separados/<int:pk>/",          SeparadoDetailView.as_view(),    name="separado_detail"),
     path("separados/<int:pk>/abonar/",   AbonarSeparadoView.as_view(),    name="abonar_separado"),
-    path("separados/<int:pk>/cancelar/", CancelarSeparadoView.as_view(),  name="cancelar_separado"),
+    path("separados/<int:pk>/cancelar/",         CancelarSeparadoView.as_view(),         name="cancelar_separado"),
+    path("separados/<int:pk>/cambiar-producto/", CambiarProductoSeparadoView.as_view(),  name="cambiar_producto_separado"),
 ]

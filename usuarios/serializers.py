@@ -68,6 +68,9 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
 
         if es_superadmin(request):
             empresa_id = request.data.get("empresa")
+            # En edición parcial, usar la empresa existente del empleado como fallback
+            if not empresa_id and self.instance:
+                empresa_id = self.instance.empresa_id
             if not empresa_id:
                 raise serializers.ValidationError({
                     "empresa": "El superadmin debe enviar empresa."

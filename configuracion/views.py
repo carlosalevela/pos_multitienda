@@ -1,6 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.db import models
 from django.db.models import Sum
 
@@ -271,7 +271,7 @@ class ResumenCuentasView(APIView):
 
 # ── Versión de la app (auto-update) ──────────────────────────
 class AppVersionView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [AllowAny]
 
     # Actualiza estos valores al publicar una nueva versión
     LATEST_VERSION = "1.1.0"

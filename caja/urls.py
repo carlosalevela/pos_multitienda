@@ -4,6 +4,7 @@ from .views import (
     SesionActivaView, SesionCajaListView,
     SesionCajaDetailView, ResumenCierreView,
     SesionGastosView, VerificarReporteView, DashboardCajaView,
+    EnviarPdfWhatsAppView,
 )
 
 urlpatterns = [
@@ -16,4 +17,5 @@ urlpatterns = [
     path("dashboard/",                  DashboardCajaView.as_view(),    name="dashboard_caja"),
     path("historial/",                  SesionCajaListView.as_view(),   name="historial_caja"),
     path("historial/<int:pk>/",         SesionCajaDetailView.as_view(), name="sesion_detail"),
+    path("historial/<int:pk>/enviar-pdf-whatsapp/", EnviarPdfWhatsAppView.as_view(), name="enviar_pdf_whatsapp"),
 ]

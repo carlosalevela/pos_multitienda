@@ -267,3 +267,19 @@ class ResumenCuentasView(APIView):
             })
 
         return Response(result)
+
+
+# ── Versión de la app (auto-update) ──────────────────────────
+class AppVersionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    # Actualiza estos valores al publicar una nueva versión
+    LATEST_VERSION = "1.1.0"
+    DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.1.0/POS_Multitienda_Setup.exe"
+
+    def get(self, request):
+        return Response({
+            "version":      self.LATEST_VERSION,
+            "download_url": self.DOWNLOAD_URL,
+            "obligatoria":  False,  # True fuerza la actualización
+        })

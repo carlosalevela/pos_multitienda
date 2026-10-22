@@ -58,6 +58,9 @@ class MovimientoCaja(models.Model):
     empleado    = models.ForeignKey(
                     "usuarios.Empleado", on_delete=models.SET_NULL,
                     null=True, blank=True)
+    cuenta_bancaria = models.ForeignKey(
+                    "configuracion.CuentaBancaria", on_delete=models.SET_NULL,
+                    null=True, blank=True, related_name="movimientos")
     created_at  = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):

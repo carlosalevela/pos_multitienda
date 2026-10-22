@@ -201,9 +201,10 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
             )
 
         # ── Abono inicial opcional ────────────────────────
-        abono_inicial = request.data.get('abono_inicial')
-        metodo_pago   = request.data.get('metodo_pago', 'efectivo')
-        en_caja       = False
+        abono_inicial     = request.data.get('abono_inicial')
+        metodo_pago       = request.data.get('metodo_pago', 'efectivo')
+        cuenta_destino_id = request.data.get('cuenta_destino')
+        en_caja           = False
 
         if abono_inicial:
             try:
@@ -238,13 +239,14 @@ class SeparadoListCreateView(generics.ListCreateAPIView):
                     tienda_id=separado.tienda_id, estado='abierta').first()
                 if sesion:
                     MovimientoCaja.objects.create(
-                        sesion        = sesion,
-                        tipo          = 'abono_separado',
-                        metodo_pago   = metodo_pago,
-                        monto         = monto,
-                        referencia_id = separado.id,
-                        empleado      = _get_empleado(request),
-                        descripcion   = (
+                        sesion             = sesion,
+                        tipo               = 'abono_separado',
+                        metodo_pago        = metodo_pago,
+                        monto              = monto,
+                        referencia_id      = separado.id,
+                        empleado           = _get_empleado(request),
+                        cuenta_bancaria_id = cuenta_destino_id or None,
+                        descripcion        = (
                             f"Abono inicial separado #{separado.id} - "
                             f"{separado.cliente.nombre} "
                             f"{separado.cliente.apellido}"
@@ -300,7 +302,8 @@ class AbonarSeparadoView(APIView):
             return Response({"error": "El monto debe ser un número válido."}, status=400)
         if monto <= 0:
             return Response({"error": "El monto debe ser mayor a 0."}, status=400)
-        metodo_pago = request.data.get("metodo_pago", "efectivo")
+        metodo_pago       = request.data.get("metodo_pago", "efectivo")
+        cuenta_destino_id = request.data.get("cuenta_destino")
 
         if monto > separado.saldo_pendiente:
             return Response(
@@ -331,13 +334,14 @@ class AbonarSeparadoView(APIView):
 
         if sesion:
             MovimientoCaja.objects.create(
-                sesion        = sesion,
-                tipo          = "abono_separado",
-                metodo_pago   = metodo_pago,
-                monto         = monto,
-                referencia_id = separado.id,
-                empleado      = _get_empleado(request),
-                descripcion   = (
+                sesion             = sesion,
+                tipo               = "abono_separado",
+                metodo_pago        = metodo_pago,
+                monto              = monto,
+                referencia_id      = separado.id,
+                empleado           = _get_empleado(request),
+                cuenta_bancaria_id = cuenta_destino_id or None,
+                descripcion        = (
                     f"Abono separado #{separado.id} - "
                     f"{separado.cliente.nombre} "
                     f"{separado.cliente.apellido}"
@@ -765,6 +769,68 @@ class AbonosPorFechaView(APIView):
             "abonos": data,
             "total":  sum(d["monto"] for d in data),
         })
+
+
+# ── Recordatorios WhatsApp de separados ──────────────────
+class RecordatoriosSeparadosView(APIView):
+    """
+    POST /api/clientes/separados/recordatorios/?dias=3&tienda_id=X
+    Solo admin/supervisor. Envía WhatsApp a clientes con separados
+    activos que vencen en los próximos `dias` días.
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def post(self, request):
+        dias = int(request.query_params.get("dias", 3))
+        tienda_id = request.query_params.get("tienda_id")
+
+        hoy     = timezone.now().date()
+        limite  = hoy + timedelta(days=dias)
+
+        qs = scope_qs(
+            request,
+            Separado.objects.filter(
+                estado="activo",
+                fecha_limite__isnull=False,
+                fecha_limite__gte=hoy,
+                fecha_limite__lte=limite,
+            ).select_related("cliente", "tienda"),
+        )
+
+        if tienda_id:
+            qs = qs.filter(tienda_id=tienda_id)
+
+        empresa = get_empresa(request)
+        if not empresa:
+            return Response({"error": "No se pudo determinar la empresa."}, status=400)
+
+        separados_data = []
+        for sep in qs:
+            separados_data.append({
+                "separado_id":    sep.id,
+                "cliente_nombre": f"{sep.cliente.nombre} {sep.cliente.apellido}".strip(),
+                "tienda_nombre":  sep.tienda.nombre,
+                "fecha_limite":   sep.fecha_limite.strftime("%d/%m/%Y"),
+                "saldo_pendiente": f"{int(sep.saldo_pendiente):,}".replace(",", "."),
+                "telefono":       sep.cliente.telefono,
+            })
+
+        if not separados_data:
+            return Response({
+                "enviados":      0,
+                "sin_telefono":  [],
+                "errores":       [],
+                "mensaje":       f"No hay separados que venzan en los próximos {dias} días.",
+            })
+
+        from configuracion.whatsapp_service import enviar_recordatorio_separado
+        resultado = enviar_recordatorio_separado(
+            empresa_id=empresa.id,
+            tienda_id=int(tienda_id) if tienda_id else None,
+            separados=separados_data,
+        )
+        resultado["total_encontrados"] = len(separados_data)
+        return Response(resultado)
 
 
 # ── Tiers de fidelización ─────────────────────────────────

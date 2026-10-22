@@ -4,7 +4,7 @@ from .views import (
     ClienteResumenView, CreditosClienteView,
     SeparadoListCreateView, SeparadoDetailView,
     AbonarSeparadoView, CancelarSeparadoView, CambiarProductoSeparadoView,
-    AlertasSeparadosView, AbonosPorFechaView,
+    AlertasSeparadosView, AbonosPorFechaView, RecordatoriosSeparadosView,
     TierConfigListCreateView, TierConfigDetailView,
 )
 
@@ -22,8 +22,9 @@ urlpatterns = [
 
     # ── Separados — rutas fijas ANTES que las dinámicas ───────
     path("separados/",          SeparadoListCreateView.as_view(), name="separados"),
-    path("separados/alertas/",  AlertasSeparadosView.as_view(),   name="alertas_separados"),   # ✅ subió
-    path("separados/abonos/",   AbonosPorFechaView.as_view(),     name="abonos_por_fecha"),    # ✅ nombre y subió
+    path("separados/alertas/",        AlertasSeparadosView.as_view(),        name="alertas_separados"),
+    path("separados/abonos/",         AbonosPorFechaView.as_view(),          name="abonos_por_fecha"),
+    path("separados/recordatorios/",  RecordatoriosSeparadosView.as_view(),  name="recordatorios_separados"),
 
     # ── Separados — rutas dinámicas con <int:pk> ──────────────
     path("separados/<int:pk>/",          SeparadoDetailView.as_view(),    name="separado_detail"),

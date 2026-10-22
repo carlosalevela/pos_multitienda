@@ -202,6 +202,7 @@ class CerrarCajaView(APIView):
                     },
                     "abonos_separados": {
                         "total":    float(abonos_total),
+                        "efectivo": float(abonos_efectivo),
                         "cantidad": sesion.movimientos.filter(tipo="abono_separado").count(),
                     },
                     "credito_efectivo":       float(credito_efectivo),
@@ -365,6 +366,17 @@ class ResumenCierreView(APIView):
         a_transferencia = agg(base_a.filter(metodo_pago="transferencia"))
         a_tarjeta       = agg(base_a.filter(metodo_pago="tarjeta"))
         num_abonos      = base_a.count()
+
+        detalle_abonos = []
+        for m in base_a.select_related("cuenta_bancaria").order_by("created_at"):
+            hora_m = timezone.localtime(m.created_at).strftime("%H:%M") if m.created_at else ""
+            detalle_abonos.append({
+                "monto":         float(m.monto),
+                "metodo_pago":   m.metodo_pago,
+                "descripcion":   m.descripcion,
+                "hora":          hora_m,
+                "cuenta_nombre": m.cuenta_bancaria.nombre if m.cuenta_bancaria else None,
+            })
         base_ac         = sesion.movimientos.filter(tipo="abono_credito")
         ac_efectivo     = agg(base_ac.filter(metodo_pago="efectivo"))
         base_cs         = sesion.movimientos.filter(tipo="cancelacion_separado")
@@ -418,6 +430,21 @@ class ResumenCierreView(APIView):
                 "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
             })
 
+        # Ventas anuladas durante este turno
+        base_anuladas   = Venta.objects.filter(sesion_caja=sesion, estado="anulada")
+        total_anulado   = base_anuladas.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        detalle_anuladas = []
+        for v in base_anuladas.select_related("empleado").order_by("created_at"):
+            hora_a = timezone.localtime(v.created_at).strftime("%H:%M") if v.created_at else ""
+            emp_a  = f"{v.empleado.nombre} {v.empleado.apellido}".strip() if v.empleado else ""
+            detalle_anuladas.append({
+                "numero_factura": v.numero_factura,
+                "hora":           hora_a,
+                "total":          float(v.total),
+                "metodo_pago":    v.metodo_pago,
+                "empleado":       emp_a,
+            })
+
         monto_esperado = (
             sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
@@ -452,14 +479,15 @@ class ResumenCierreView(APIView):
                 "detalle":  detalle_gastos,
             },
             "abonos": {
-                "efectivo":              float(a_efectivo),
-                "transferencia":         float(a_transferencia),
-                "tarjeta":               float(a_tarjeta),
-                "total":                 float(a_efectivo + a_transferencia + a_tarjeta),
-                "cantidad":              num_abonos,
-                "credito_efectivo":        float(ac_efectivo),
+                "efectivo":               float(a_efectivo),
+                "transferencia":          float(a_transferencia),
+                "tarjeta":                float(a_tarjeta),
+                "total":                  float(a_efectivo + a_transferencia + a_tarjeta),
+                "cantidad":               num_abonos,
+                "credito_efectivo":       float(ac_efectivo),
                 "cancelaciones_efectivo": float(cs_efectivo),
                 "ingresos_manual":        float(im_efectivo),
+                "detalle":                detalle_abonos,
             },
             "devoluciones": {
                 "efectivo":         float(dev_efectivo),
@@ -471,6 +499,11 @@ class ResumenCierreView(APIView):
                     tipo="cambio", producto_reemplazo__isnull=False
                 ).count(),
                 "detalle":          detalle_devs,
+            },
+            "anulaciones": {
+                "cantidad":      base_anuladas.count(),
+                "total_anulado": float(total_anulado),
+                "detalle":       detalle_anuladas,
             },
             "monto_esperado_caja": float(monto_esperado),
             "ventas_detalle":      ventas_detalle,
@@ -716,3 +749,46 @@ class DashboardCajaView(APIView):
             "alertas_faltantes": alertas_faltantes,
             "top_crecimiento":   top_crecimiento,
         })
+
+
+# ── Enviar PDF de cierre por WhatsApp ────────────────────────
+class EnviarPdfWhatsAppView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        filtro = {"pk": pk}
+        if not es_superadmin(request):
+            filtro["tienda__empresa"] = get_empresa(request)
+        if request.user.rol == "cajero":
+            filtro["tienda_id"] = request.user.tienda_id
+
+        try:
+            sesion = SesionCaja.objects.select_related("tienda").get(**filtro)
+        except SesionCaja.DoesNotExist:
+            return Response({"error": "Sesión no encontrada."}, status=404)
+
+        pdf_file = request.FILES.get("pdf")
+        if not pdf_file:
+            return Response({"error": "Falta el archivo PDF."}, status=400)
+
+        pdf_bytes = pdf_file.read()
+        fecha     = sesion.fecha_cierre.strftime("%Y-%m-%d") if sesion.fecha_cierre else sesion.fecha_apertura.strftime("%Y-%m-%d")
+        filename  = f"CIERRE_{sesion.id}_{fecha}_{sesion.tienda.nombre.replace(' ', '_')}.pdf"
+        caption   = f"Cierre de Caja #{sesion.id} - {sesion.tienda.nombre} ({fecha})"
+
+        from configuracion.whatsapp_service import enviar_pdf_cierre
+        resultado = enviar_pdf_cierre(
+            empresa_id=sesion.tienda.empresa_id,
+            tienda_id=sesion.tienda_id,
+            pdf_bytes=pdf_bytes,
+            filename=filename,
+            caption=caption,
+        )
+
+        if resultado["enviados"] == 0:
+            return Response(
+                {"error": "No se pudo enviar el PDF.", "detalle": resultado["errores"]},
+                status=502,
+            )
+
+        return Response(resultado)

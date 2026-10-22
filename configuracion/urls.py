@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (ConfigTiendaView, ConfigImpresionView, ConfigDefaultsView,
-                    CuentaBancariaListView, CuentaBancariaDetailView, ResumenCuentasView)
+                    CuentaBancariaListView, CuentaBancariaDetailView, ResumenCuentasView,
+                    AppVersionView)
 
 urlpatterns = [
     path("defaults/",                                         ConfigDefaultsView.as_view(),     name="config_defaults"),
@@ -10,4 +11,5 @@ urlpatterns = [
     path("cuentas/<int:tienda_id>/",                          CuentaBancariaListView.as_view(),  name="cuentas_list"),
     path("cuentas/<int:tienda_id>/resumen/",                  ResumenCuentasView.as_view(),      name="cuentas_resumen"),
     path("cuentas/<int:tienda_id>/<int:cuenta_id>/",          CuentaBancariaDetailView.as_view(),name="cuentas_detail"),
+    path("version/",                                           AppVersionView.as_view(),          name="app_version"),
 ]

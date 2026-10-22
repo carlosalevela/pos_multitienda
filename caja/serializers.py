@@ -199,6 +199,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     abonos_transferencia     = serializers.SerializerMethodField()
     abonos_total             = serializers.SerializerMethodField()
     abonos_credito_efectivo  = serializers.SerializerMethodField()
+    abonos_detalle           = serializers.SerializerMethodField()
     cancelaciones_efectivo   = serializers.SerializerMethodField()
     ingresos_manual          = serializers.SerializerMethodField()
     num_abonos               = serializers.SerializerMethodField()
@@ -222,9 +223,9 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "num_devoluciones", "num_cambios_producto",
             "abonos_efectivo", "abonos_tarjeta",
             "abonos_transferencia", "abonos_total",
-            "abonos_credito_efectivo", "cancelaciones_efectivo",
-            "ingresos_manual", "num_abonos",
-            "monto_esperado",
+            "abonos_credito_efectivo", "abonos_detalle",
+            "cancelaciones_efectivo", "ingresos_manual",
+            "num_abonos", "monto_esperado",
         ]
         read_only_fields = [
             "id", "empleado", "fecha_apertura", "fecha_cierre",
@@ -288,7 +289,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         ventas = (
             Venta.objects
             .filter(sesion_caja=obj, estado="completada")
-            .select_related("cliente", "empleado")
+            .select_related("cliente", "empleado", "cuenta_destino")
             .prefetch_related("detalles__producto")
             .order_by("created_at")
         )
@@ -313,6 +314,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
                 "hora":           hora,
                 "cliente":        cliente or "Consumidor Final",
                 "metodo_pago":    v.metodo_pago,
+                "cuenta_nombre":  v.cuenta_destino.nombre if v.cuenta_destino else None,
                 "total":          float(v.total),
                 "productos":      productos,
             })
@@ -360,6 +362,19 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     def get_abonos_tarjeta(self, obj):          return self._asum(obj, "tarjeta")
     def get_abonos_transferencia(self, obj):    return self._asum(obj, "transferencia")
     def get_abonos_total(self, obj):            return self._asum(obj)
+    def get_abonos_detalle(self, obj):
+        from django.utils import timezone as tz
+        result = []
+        for m in obj.movimientos.filter(tipo="abono_separado").select_related("cuenta_bancaria").order_by("created_at"):
+            hora = tz.localtime(m.created_at).strftime("%H:%M") if m.created_at else ""
+            result.append({
+                "monto":         float(m.monto),
+                "metodo_pago":   m.metodo_pago,
+                "descripcion":   m.descripcion,
+                "hora":          hora,
+                "cuenta_nombre": m.cuenta_bancaria.nombre if m.cuenta_bancaria else None,
+            })
+        return result
     def get_abonos_credito_efectivo(self, obj):
         return float(obj.movimientos.filter(tipo="abono_credito", metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or 0)
     def get_cancelaciones_efectivo(self, obj):

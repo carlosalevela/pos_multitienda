@@ -5,8 +5,9 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_API_URL = "https://graph.facebook.com/v25.0/{phone_number_id}/messages"
-_TEMPLATE_NAME = "cierre_turno"
+_API_URL   = "https://graph.facebook.com/v25.0/{phone_number_id}/messages"
+_MEDIA_URL = "https://graph.facebook.com/v25.0/{phone_number_id}/media"
+_TEMPLATE_NAME = "cierre_turno_v2"
 _TEMPLATE_LANG  = "es_CO"
 
 
@@ -83,11 +84,15 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     else:
         estado_dif = f"SOBRANTE: {_fmt(dif)}"
 
+    abonos_ef = sep.get("efectivo", 0)
+
     cuadre_partes = []
     if ini:
         cuadre_partes.append(_seg("Base:", ini))
     if ef_ventas:
         cuadre_partes.append(_seg("+Ventas ef:", ef_ventas))
+    if abonos_ef:
+        cuadre_partes.append(_seg("+Abonos ef:", abonos_ef))
     cuadre_partes.append(_seg("=Esperado:", esperado))
     if contado:
         cuadre_partes.append(_seg("Contado:", contado))
@@ -173,3 +178,164 @@ def enviar_cierre_turno(empresa_id: int, tienda_id: int, datos: dict):
                              header_params, body_params)
 
     threading.Thread(target=_enviar_todos, daemon=True).start()
+
+
+# ── Envío de PDF de cierre ────────────────────────────────
+
+def _subir_pdf(token: str, phone_number_id: str, pdf_bytes: bytes, filename: str) -> str:
+    """Sube el PDF a la API de Meta y devuelve el media_id."""
+    url = _MEDIA_URL.format(phone_number_id=phone_number_id)
+    r = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {token}"},
+        files={
+            "file":              (filename, pdf_bytes, "application/pdf"),
+            "type":              (None, "application/pdf"),
+            "messaging_product": (None, "whatsapp"),
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()["id"]
+
+
+def _enviar_documento(token: str, phone_number_id: str, numero: str,
+                      media_id: str, caption: str, filename: str):
+    """Envía el documento ya subido a un número de WhatsApp."""
+    url = _API_URL.format(phone_number_id=phone_number_id)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type":  "application/json",
+    }
+    payload = {
+        "messaging_product": "whatsapp",
+        "to":   numero,
+        "type": "document",
+        "document": {
+            "id":       media_id,
+            "caption":  caption,
+            "filename": filename,
+        },
+    }
+    r = requests.post(url, json=payload, headers=headers, timeout=10)
+    if not r.ok:
+        logger.error("WA doc error %s a %s: %s", r.status_code, numero, r.text)
+    r.raise_for_status()
+    logger.info("WA documento enviado a %s", numero)
+
+
+def enviar_pdf_cierre(empresa_id: int, tienda_id: int,
+                      pdf_bytes: bytes, filename: str, caption: str) -> dict:
+    """
+    Sube el PDF a Meta una sola vez y lo envía a todos los destinatarios
+    configurados para la tienda.
+    Devuelve {"enviados": N, "errores": [...]}.
+    """
+    from .models import WhatsAppConfig, WhatsAppDestinatario
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return {"enviados": 0, "errores": ["Sin configuración de WhatsApp."]}
+
+    destinatarios = list(WhatsAppDestinatario.objects.filter(
+        empresa_id=empresa_id, activo=True,
+    ))
+    destinatarios = [
+        d for d in destinatarios
+        if not d.tiendas.exists() or d.tiendas.filter(id=tienda_id).exists()
+    ]
+
+    if not destinatarios:
+        return {"enviados": 0, "errores": ["Sin destinatarios configurados."]}
+
+    try:
+        media_id = _subir_pdf(cfg.token, cfg.phone_number_id, pdf_bytes, filename)
+    except Exception as exc:
+        logger.error("WA: error subiendo PDF: %s", exc)
+        return {"enviados": 0, "errores": [f"Error subiendo PDF: {exc}"]}
+
+    enviados = 0
+    errores  = []
+    for d in destinatarios:
+        try:
+            _enviar_documento(cfg.token, cfg.phone_number_id, d.numero,
+                              media_id, caption, filename)
+            enviados += 1
+        except Exception as exc:
+            errores.append(f"{d.numero}: {exc}")
+
+    return {"enviados": enviados, "errores": errores}
+
+
+# ── Recordatorio de separados próximos a vencer ───────────
+_TEMPLATE_RECORDATORIO = "recordatorio_separado"
+
+
+def enviar_recordatorio_separado(empresa_id: int, tienda_id: int, separados: list) -> dict:
+    """
+    Envía un WhatsApp de recordatorio a los clientes de los separados dados.
+    separados: lista de dicts con keys: cliente_nombre, separado_id, tienda_nombre,
+               fecha_limite (str DD/MM/YYYY), saldo_pendiente (str), telefono.
+    Devuelve {"enviados": N, "sin_telefono": [...], "errores": [...]}.
+    """
+    from .models import WhatsAppConfig
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return {"enviados": 0, "sin_telefono": [], "errores": ["Sin configuración de WhatsApp."]}
+
+    enviados    = 0
+    errores     = []
+    sin_telefono = []
+
+    for s in separados:
+        numero = (s.get("telefono") or "").strip()
+        if not numero:
+            sin_telefono.append(f"Separado #{s['separado_id']} - {s['cliente_nombre']}")
+            continue
+        # Normalizar número: agregar 57 si no tiene código de país
+        if not numero.startswith("+") and not numero.startswith("57"):
+            numero = "57" + numero
+
+        body_params = [
+            s["cliente_nombre"],
+            str(s["separado_id"]),
+            s["tienda_nombre"],
+            s["fecha_limite"],
+            s["saldo_pendiente"],
+        ]
+        try:
+            url = _API_URL.format(phone_number_id=cfg.phone_number_id)
+            payload = {
+                "messaging_product": "whatsapp",
+                "to":   numero,
+                "type": "template",
+                "template": {
+                    "name":     _TEMPLATE_RECORDATORIO,
+                    "language": {"code": _TEMPLATE_LANG},
+                    "components": [
+                        {
+                            "type": "body",
+                            "parameters": [{"type": "text", "text": p} for p in body_params],
+                        },
+                    ],
+                },
+            }
+            r = requests.post(url, json=payload,
+                              headers={"Authorization": f"Bearer {cfg.token}",
+                                       "Content-Type": "application/json"},
+                              timeout=10)
+            if not r.ok:
+                logger.error("WA recordatorio error %s a %s: %s", r.status_code, numero, r.text)
+                errores.append(f"{s['cliente_nombre']} ({numero}): {r.text[:80]}")
+            else:
+                logger.info("WA recordatorio enviado a %s (separado #%s)", numero, s["separado_id"])
+                enviados += 1
+        except Exception as exc:
+            errores.append(f"{s['cliente_nombre']} ({numero}): {exc}")
+
+    return {"enviados": enviados, "sin_telefono": sin_telefono, "errores": errores}

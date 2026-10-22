@@ -22,9 +22,10 @@ def _seg(label: str, valor: float) -> str:
 
 def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     """
-    Plantilla cierre_turno:
-      Header → {{1}} tienda
-      Body   → {{1}} colaborador | {{2}} fecha | {{3}} detalle financiero | {{4}} cuadre
+    Plantilla cierre_turno_v2:
+      Header → texto fijo "CIERRE DE TURNO" (sin variables)
+      Body   → {{1}} tienda | {{2}} cajero | {{3}} fecha
+               {{4}} ventas del turno | {{5}} abonos y gastos | {{6}} cuadre
     NOTA: parámetros deben ser una sola línea sin saltos ni >4 espacios seguidos.
     """
     v        = datos["ventas"]
@@ -39,44 +40,39 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     canc     = datos.get("cancelaciones_efectivo", 0)
     ing_m    = datos.get("ingresos_manual", 0)
 
-    # ── Ventas del turno por método ──
+    # ── {{4}} Ventas del turno (cada método en su línea) ──
     ef_ventas = v.get("efectivo", 0)
-    partes_metodos = []
+    partes_v = []
     if ef_ventas:
-        partes_metodos.append(_seg("Efec:", ef_ventas))
+        partes_v.append(_seg("Efectivo:", ef_ventas))
     if v.get("tarjeta", 0):
-        partes_metodos.append(_seg("Tarj:", v["tarjeta"]))
+        partes_v.append(_seg("Tarjeta:", v["tarjeta"]))
     if v.get("transferencia", 0):
-        partes_metodos.append(_seg("Transf:", v["transferencia"]))
+        partes_v.append(_seg("Transferencia:", v["transferencia"]))
     if v.get("mixto", 0):
-        partes_metodos.append(_seg("Mixto:", v["mixto"]))
+        partes_v.append(_seg("Mixto:", v["mixto"]))
+    partes_v.append(f"TOTAL: {_fmt(v['total'])} ({v['num_transacciones']} transac.)")
+    ventas_str = " | ".join(partes_v)
 
-    total_ventas_str = _seg("TOTAL VENTAS:", v["total"])
-    metodos_str = " | ".join(partes_metodos)
-
-    # ── Ingresos y egresos adicionales ──
+    # ── {{5}} Abonos y gastos (cada item en su línea) ──
     sep_total = sep.get("total", 0)
     sep_cant  = sep.get("cantidad", 0)
-    extras = []
+    partes_ag = []
     if sep_total:
-        extras.append(_seg(f"Separados({sep_cant}):", sep_total))
+        partes_ag.append(f"Abonos: {_fmt(sep_total)} ({sep_cant} abonos)")
     if cred:
-        extras.append(_seg("Credito:", cred))
+        partes_ag.append(_seg("Credito:", cred))
     if canc:
-        extras.append(_seg("Cancelac:", canc))
+        partes_ag.append(_seg("Cancelac:", canc))
     if ing_m:
-        extras.append(_seg("Ingresos:", ing_m))
+        partes_ag.append(_seg("Ingresos:", ing_m))
     if dev:
-        extras.append(_seg("Devoluc:", dev))
+        partes_ag.append(_seg("Devoluc:", dev))
     if gastos:
-        extras.append(_seg("Gastos:", gastos))
+        partes_ag.append(_seg("Gastos:", gastos))
+    abonos_gastos_str = " | ".join(partes_ag) if partes_ag else "Sin movimientos adicionales"
 
-    partes = [f"{v['num_transacciones']} transac.", metodos_str, total_ventas_str]
-    if extras:
-        partes.append("+" + " | ".join(extras))
-    resumen = " -- ".join(p for p in partes if p)
-
-    # ── Cuadre de efectivo ──
+    # ── {{6}} Cuadre de efectivo (cada línea separada) ──
     if dif == 0:
         estado_dif = "Cuadre exacto"
     elif dif < 0:
@@ -85,7 +81,6 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
         estado_dif = f"SOBRANTE: {_fmt(dif)}"
 
     abonos_ef = sep.get("efectivo", 0)
-
     cuadre_partes = []
     if ini:
         cuadre_partes.append(_seg("Base:", ini))
@@ -99,12 +94,14 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     cuadre_partes.append(estado_dif)
     cuadre = " | ".join(cuadre_partes)
 
-    header_params = [datos["tienda_nombre"]]
+    header_params = []   # header es texto fijo, sin variables
     body_params   = [
-        datos.get("colaborador_nombre") or datos.get("empleado_nombre", "—"),
-        datos["fecha_cierre"],
-        resumen,
-        cuadre,
+        datos["tienda_nombre"],                                                # {{1}}
+        datos.get("colaborador_nombre") or datos.get("empleado_nombre", "—"), # {{2}}
+        datos["fecha_cierre"],                                                 # {{3}}
+        ventas_str,                                                            # {{4}}
+        abonos_gastos_str,                                                     # {{5}}
+        cuadre,                                                                # {{6}}
     ]
     return header_params, body_params
 
@@ -116,23 +113,24 @@ def _enviar_template(token: str, phone_number_id: str, numero: str,
         "Authorization": f"Bearer {token}",
         "Content-Type":  "application/json",
     }
+    components = []
+    if header_params:
+        components.append({
+            "type": "header",
+            "parameters": [{"type": "text", "text": p} for p in header_params],
+        })
+    components.append({
+        "type": "body",
+        "parameters": [{"type": "text", "text": p} for p in body_params],
+    })
     payload = {
         "messaging_product": "whatsapp",
         "to":   numero,
         "type": "template",
         "template": {
-            "name":     _TEMPLATE_NAME,
-            "language": {"code": _TEMPLATE_LANG},
-            "components": [
-                {
-                    "type": "header",
-                    "parameters": [{"type": "text", "text": p} for p in header_params],
-                },
-                {
-                    "type": "body",
-                    "parameters": [{"type": "text", "text": p} for p in body_params],
-                },
-            ],
+            "name":       _TEMPLATE_NAME,
+            "language":   {"code": _TEMPLATE_LANG},
+            "components": components,
         },
     }
     try:
@@ -263,6 +261,92 @@ def enviar_pdf_cierre(empresa_id: int, tienda_id: int,
             _enviar_documento(cfg.token, cfg.phone_number_id, d.numero,
                               media_id, caption, filename)
             enviados += 1
+        except Exception as exc:
+            errores.append(f"{d.numero}: {exc}")
+
+    return {"enviados": enviados, "errores": errores}
+
+
+# ── Envío de PDF con template aprobado cierre_pdf ────────
+_TEMPLATE_PDF = "cierre_pdf"
+
+
+def enviar_pdf_cierre_template(empresa_id: int, tienda_id: int,
+                                pdf_bytes: bytes, filename: str,
+                                tienda_nombre: str, fecha: str) -> dict:
+    """
+    Sube el PDF a Meta y lo envía usando el template 'cierre_pdf'.
+    Body: {{1}} = tienda_nombre, {{2}} = fecha (DD/MM/YYYY).
+    """
+    from .models import WhatsAppConfig, WhatsAppDestinatario
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return {"enviados": 0, "errores": ["Sin configuración de WhatsApp."]}
+
+    destinatarios = list(WhatsAppDestinatario.objects.filter(
+        empresa_id=empresa_id, activo=True,
+    ))
+    destinatarios = [
+        d for d in destinatarios
+        if not d.tiendas.exists() or d.tiendas.filter(id=tienda_id).exists()
+    ]
+    if not destinatarios:
+        return {"enviados": 0, "errores": ["Sin destinatarios configurados."]}
+
+    try:
+        media_id = _subir_pdf(cfg.token, cfg.phone_number_id, pdf_bytes, filename)
+    except Exception as exc:
+        logger.error("WA: error subiendo PDF: %s", exc)
+        return {"enviados": 0, "errores": [f"Error subiendo PDF: {exc}"]}
+
+    # Convertir fecha YYYY-MM-DD → DD/MM/YYYY si es necesario
+    if len(fecha) == 10 and fecha[4] == '-':
+        fecha = f"{fecha[8:10]}/{fecha[5:7]}/{fecha[:4]}"
+
+    url = _API_URL.format(phone_number_id=cfg.phone_number_id)
+    headers = {"Authorization": f"Bearer {cfg.token}", "Content-Type": "application/json"}
+
+    enviados = 0
+    errores  = []
+    for d in destinatarios:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to":   d.numero,
+            "type": "template",
+            "template": {
+                "name":     _TEMPLATE_PDF,
+                "language": {"code": _TEMPLATE_LANG},
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type":     "document",
+                                "document": {"id": media_id, "filename": filename},
+                            }
+                        ],
+                    },
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": tienda_nombre},
+                            {"type": "text", "text": fecha},
+                        ],
+                    },
+                ],
+            },
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            if not r.ok:
+                logger.error("WA cierre_pdf error %s a %s: %s", r.status_code, d.numero, r.text)
+                errores.append(f"{d.numero}: {r.text[:80]}")
+            else:
+                logger.info("WA cierre_pdf enviado a %s", d.numero)
+                enviados += 1
         except Exception as exc:
             errores.append(f"{d.numero}: {exc}")
 

@@ -776,13 +776,14 @@ class EnviarPdfWhatsAppView(APIView):
         filename  = f"CIERRE_{sesion.id}_{fecha}_{sesion.tienda.nombre.replace(' ', '_')}.pdf"
         caption   = f"Cierre de Caja #{sesion.id} - {sesion.tienda.nombre} ({fecha})"
 
-        from configuracion.whatsapp_service import enviar_pdf_cierre
-        resultado = enviar_pdf_cierre(
+        from configuracion.whatsapp_service import enviar_pdf_cierre_template
+        resultado = enviar_pdf_cierre_template(
             empresa_id=sesion.tienda.empresa_id,
             tienda_id=sesion.tienda_id,
             pdf_bytes=pdf_bytes,
             filename=filename,
-            caption=caption,
+            tienda_nombre=sesion.tienda.nombre,
+            fecha=fecha,
         )
 
         if resultado["enviados"] == 0:

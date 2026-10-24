@@ -67,7 +67,7 @@ def _cajas_abiertas(request, tienda_id, fecha_fin):
     Usado para bloquear exports y advertir en reportes JSON.
     """
     from datetime import date as _date
-    today = timezone.now().date()
+    today = timezone.localdate()
     try:
         fd = _date.fromisoformat(str(fecha_fin)) if fecha_fin else today
     except (ValueError, TypeError):
@@ -107,7 +107,7 @@ class GastoListCreateView(generics.ListCreateAPIView):
 
         user = self.request.user
         if user.rol == 'cajero':
-            fecha = self.request.query_params.get("fecha") or str(timezone.now().date())
+            fecha = self.request.query_params.get("fecha") or str(timezone.localdate())
             return qs.filter(
                 tienda_id=user.tienda_id,
                 created_at__date=fecha,
@@ -126,7 +126,7 @@ class GastoListCreateView(generics.ListCreateAPIView):
         elif fecha:
             qs = qs.filter(created_at__date=fecha)
         else:
-            qs = qs.filter(created_at__date=timezone.now().date())
+            qs = qs.filter(created_at__date=timezone.localdate())
 
         if tienda_id:   qs = qs.filter(tienda_id=tienda_id)
         if categoria:   qs = qs.filter(categoria__iexact=categoria)
@@ -195,7 +195,7 @@ class ResumenDiarioView(APIView):
     permission_classes = [EsAdminSupervisorOCajero]
 
     def get(self, request):
-        fecha     = request.query_params.get("fecha") or timezone.now().date()
+        fecha     = request.query_params.get("fecha") or timezone.localdate()
         tienda_id = request.query_params.get("tienda_id")
 
         if request.user.rol == "cajero":
@@ -481,7 +481,7 @@ class EstadoResultadosView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
@@ -633,7 +633,7 @@ class ComparativoTiendasView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
 
@@ -770,7 +770,7 @@ class VentasPorEmpleadoView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
@@ -829,7 +829,7 @@ class PuntoEquilibrioView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
@@ -945,7 +945,7 @@ class FlujoCajaView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
@@ -1356,7 +1356,7 @@ class RentabilidadProductosView(APIView):
         from django.db.models import ExpressionWrapper, DecimalField as OrmDecimal, Value
         from django.db.models.functions import Coalesce
 
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")
@@ -1435,7 +1435,7 @@ class ExportarContabilidadView(APIView):
     def get(self, request):
         import traceback
         tipo      = request.query_params.get("tipo", "estado-resultados")
-        today     = timezone.now().date()
+        today     = timezone.localdate()
         fecha_ini = request.query_params.get("fecha_ini") or today.replace(day=1).isoformat()
         fecha_fin = request.query_params.get("fecha_fin") or today.isoformat()
         tienda_id = request.query_params.get("tienda_id")

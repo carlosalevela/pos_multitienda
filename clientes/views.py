@@ -642,7 +642,7 @@ class AlertasSeparadosView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        hoy     = timezone.now().date()
+        hoy     = timezone.localdate()
         en3dias = hoy + timedelta(days=3)
 
         qs = scope_qs(
@@ -784,7 +784,7 @@ class RecordatoriosSeparadosView(APIView):
         dias = int(request.query_params.get("dias", 3))
         tienda_id = request.query_params.get("tienda_id")
 
-        hoy     = timezone.now().date()
+        hoy     = timezone.localdate()
         limite  = hoy + timedelta(days=dias)
 
         qs = scope_qs(

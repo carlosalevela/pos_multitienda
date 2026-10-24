@@ -503,12 +503,13 @@ class DashboardAdminView(APIView):
     permission_classes = [EsAdminOSupervisor]
 
     def get(self, request):
-        hoy          = timezone.now().date()
+        hoy          = timezone.localdate()
         ayer         = hoy - timedelta(days=1)
-        inicio_mes   = timezone.now().replace(
+        ahora_local  = timezone.localtime(timezone.now())
+        inicio_mes   = ahora_local.replace(
             day=1, hour=0, minute=0, second=0, microsecond=0)
-        dia_semana    = timezone.now().weekday()
-        inicio_semana = (timezone.now() - timedelta(days=dia_semana)).replace(
+        dia_semana    = ahora_local.weekday()
+        inicio_semana = (ahora_local - timedelta(days=dia_semana)).replace(
             hour=0, minute=0, second=0, microsecond=0)
 
         periodo        = request.query_params.get("periodo", "mensual")

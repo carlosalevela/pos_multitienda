@@ -70,6 +70,17 @@ class ClienteSerializer(serializers.ModelSerializer):
     def get_tier_info(self, obj):
         return _tier_info(obj, self.context.get('tier_configs'))
 
+    def validate_telefono(self, value):
+        if not value:
+            return value
+        # Normalizar: quitar espacios/guiones, agregar 57 si falta código de país
+        limpio = value.strip().replace(' ', '').replace('-', '')
+        if limpio.startswith('+57'):
+            limpio = limpio[1:]          # quitar el +, dejar 57...
+        elif not limpio.startswith('57'):
+            limpio = '57' + limpio
+        return limpio
+
     def validate_cedula_nit(self, value):
         if not value:
             return value

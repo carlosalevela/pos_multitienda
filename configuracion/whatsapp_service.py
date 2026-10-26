@@ -26,7 +26,6 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
       Header → texto fijo "CIERRE DE TURNO" (sin variables)
       Body   → {{1}} tienda | {{2}} cajero | {{3}} fecha
                {{4}} ventas del turno | {{5}} abonos y gastos | {{6}} cuadre
-    NOTA: parámetros deben ser una sola línea sin saltos ni >4 espacios seguidos.
     """
     v        = datos["ventas"]
     gastos   = datos.get("total_gastos", 0)
@@ -40,57 +39,59 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
     canc     = datos.get("cancelaciones_efectivo", 0)
     ing_m    = datos.get("ingresos_manual", 0)
 
-    # ── {{4}} Ventas del turno (cada método en su línea) ──
+    # ── {{4}} Ventas del turno ──
     ef_ventas = v.get("efectivo", 0)
     partes_v = []
     if ef_ventas:
-        partes_v.append(_seg("Efectivo:", ef_ventas))
+        partes_v.append(f"Efectivo {_fmt(ef_ventas)}")
     if v.get("tarjeta", 0):
-        partes_v.append(_seg("Tarjeta:", v["tarjeta"]))
+        partes_v.append(f"Tarjeta {_fmt(v['tarjeta'])}")
     if v.get("transferencia", 0):
-        partes_v.append(_seg("Transferencia:", v["transferencia"]))
+        partes_v.append(f"Transfer {_fmt(v['transferencia'])}")
     if v.get("mixto", 0):
-        partes_v.append(_seg("Mixto:", v["mixto"]))
-    partes_v.append(f"TOTAL: {_fmt(v['total'])} ({v['num_transacciones']} transac.)")
+        partes_v.append(f"Mixto {_fmt(v['mixto'])}")
+    partes_v.append(f"TOTAL {_fmt(v['total'])} ({v['num_transacciones']} ventas)")
     ventas_str = " | ".join(partes_v)
 
-    # ── {{5}} Abonos y gastos (cada item en su línea) ──
+    # ── {{5}} Abonos y gastos ──
     sep_total = sep.get("total", 0)
     sep_cant  = sep.get("cantidad", 0)
     partes_ag = []
     if sep_total:
-        partes_ag.append(f"Abonos: {_fmt(sep_total)} ({sep_cant} abonos)")
+        partes_ag.append(f"Abonos {_fmt(sep_total)} ({sep_cant})")
     if cred:
-        partes_ag.append(_seg("Credito:", cred))
+        partes_ag.append(f"Credito {_fmt(cred)}")
     if canc:
-        partes_ag.append(_seg("Cancelac:", canc))
+        partes_ag.append(f"Cancelac {_fmt(canc)}")
     if ing_m:
-        partes_ag.append(_seg("Ingresos:", ing_m))
+        partes_ag.append(f"Ingresos {_fmt(ing_m)}")
     if dev:
-        partes_ag.append(_seg("Devoluc:", dev))
+        partes_ag.append(f"Devoluc {_fmt(dev)}")
     if gastos:
-        partes_ag.append(_seg("Gastos:", gastos))
+        partes_ag.append(f"Gastos {_fmt(gastos)}")
     abonos_gastos_str = " | ".join(partes_ag) if partes_ag else "Sin movimientos adicionales"
 
-    # ── {{6}} Cuadre de efectivo (cada línea separada) ──
+    # ── {{6}} Cuadre de efectivo ──
     if dif == 0:
-        estado_dif = "Cuadre exacto"
+        estado_dif = "CUADRE OK ✅"
     elif dif < 0:
-        estado_dif = f"FALTANTE: {_fmt(abs(dif))}"
+        estado_dif = f"FALTANTE {_fmt(abs(dif))} ❌"
     else:
-        estado_dif = f"SOBRANTE: {_fmt(dif)}"
+        estado_dif = f"SOBRANTE {_fmt(dif)} ⚠️"
 
     abonos_ef = sep.get("efectivo", 0)
     cuadre_partes = []
     if ini:
-        cuadre_partes.append(_seg("Base:", ini))
+        cuadre_partes.append(f"Base {_fmt(ini)}")
     if ef_ventas:
-        cuadre_partes.append(_seg("+Ventas ef:", ef_ventas))
+        cuadre_partes.append(f"+Ventas {_fmt(ef_ventas)}")
     if abonos_ef:
-        cuadre_partes.append(_seg("+Abonos ef:", abonos_ef))
-    cuadre_partes.append(_seg("=Esperado:", esperado))
+        cuadre_partes.append(f"+Abonos {_fmt(abonos_ef)}")
+    cuadre_partes.append(f"Esperado {_fmt(esperado)}")
+    valor_entregar = esperado - ini
+    cuadre_partes.append(f"ENTREGAR 💵 {_fmt(valor_entregar)}")
     if contado:
-        cuadre_partes.append(_seg("Contado:", contado))
+        cuadre_partes.append(f"Contado {_fmt(contado)}")
     cuadre_partes.append(estado_dif)
     cuadre = " | ".join(cuadre_partes)
 
@@ -381,9 +382,9 @@ def enviar_recordatorio_separado(empresa_id: int, tienda_id: int, separados: lis
         if not numero:
             sin_telefono.append(f"Separado #{s['separado_id']} - {s['cliente_nombre']}")
             continue
-        # Normalizar número: agregar 57 si no tiene código de país
-        if not numero.startswith("+") and not numero.startswith("57"):
-            numero = "57" + numero
+        # El número ya viene normalizado con 57 desde el serializer del cliente
+        if numero.startswith("+"):
+            numero = numero[1:]
 
         body_params = [
             s["cliente_nombre"],

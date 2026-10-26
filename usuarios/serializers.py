@@ -109,27 +109,6 @@ class CrearEmpleadoSerializer(serializers.ModelSerializer):
 class CustomTokenSerializer(TokenObtainPairSerializer):
     """JWT con datos extra del empleado en el token. Acepta email o cédula."""
 
-    def validate(self, attrs):
-        identificador = attrs.get("email", "").strip()
-
-        if identificador and "@" not in identificador:
-            # Sin '@' → asumir cédula
-            empleados = Empleado.objects.filter(
-                cedula=identificador, activo=True
-            )
-            count = empleados.count()
-            if count == 0:
-                raise serializers.ValidationError(
-                    {"email": "No se encontró un usuario activo con esa cédula."}
-                )
-            if count > 1:
-                raise serializers.ValidationError(
-                    {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
-                )
-            attrs["email"] = empleados.first().email
-
-        return super().validate(attrs)
-
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -138,7 +117,6 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
         token["rol"] = user.rol
         token["tienda_id"] = user.tienda_id
         token["tienda_nombre"] = user.tienda.nombre if user.tienda else ""
-        # Fallback: si empresa no está asignada directamente, inferir desde tienda
         empresa_id = user.empresa_id
         if not empresa_id and user.tienda_id:
             empresa_id = user.tienda.empresa_id
@@ -150,6 +128,21 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        identificador = attrs.get("email", "").strip()
+
+        if identificador and "@" not in identificador:
+            empleados = Empleado.objects.filter(cedula=identificador, activo=True)
+            count = empleados.count()
+            if count == 0:
+                raise serializers.ValidationError(
+                    {"email": "No se encontró un usuario activo con esa cédula."}
+                )
+            if count > 1:
+                raise serializers.ValidationError(
+                    {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
+                )
+            attrs["email"] = empleados.first().email
+
         data = super().validate(attrs)
         empleado = self.user
         empresa_id = empleado.empresa_id

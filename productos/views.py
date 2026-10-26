@@ -60,15 +60,19 @@ class CategoriaListCreateView(generics.ListCreateAPIView):
         return [EsAdminOSupervisor()]
 
     def get_queryset(self):
+        tienda_id = self.request.query_params.get("tienda_id")
         if es_superadmin(self.request):
             empresa_id = self.request.query_params.get("empresa")
             qs = Categoria.objects.all()
             if empresa_id:
                 qs = qs.filter(empresa_id=empresa_id)
-            return qs.order_by("nombre")
-        return Categoria.objects.filter(
-            empresa=get_empresa(self.request)
-        ).order_by("nombre")
+        else:
+            qs = Categoria.objects.filter(empresa=get_empresa(self.request))
+        if tienda_id:
+            qs = qs.filter(
+                productos__inventarios__tienda_id=tienda_id
+            ).distinct()
+        return qs.order_by("nombre")
 
     def perform_create(self, serializer):
         if es_superadmin(self.request):
@@ -121,23 +125,39 @@ class ProductoListCreateView(generics.ListCreateAPIView):
         precio_min = self.request.query_params.get("precio_min")
         precio_max = self.request.query_params.get("precio_max")
 
+        alerta = self.request.query_params.get("alerta")
+
         if categoria:  qs = qs.filter(categoria_id=categoria)
         if precio_min: qs = qs.filter(precio_venta__gte=precio_min)
         if precio_max: qs = qs.filter(precio_venta__lte=precio_max)
         if buscar:
-            q_filter = Q(nombre__icontains=buscar) | Q(codigo_barras__icontains=buscar)
+            q_filter = (Q(nombre__icontains=buscar) |
+                        Q(codigo_barras__icontains=buscar) |
+                        Q(categoria__nombre__icontains=buscar))
             try:
                 q_filter |= Q(precio_venta=float(buscar))
             except ValueError:
                 pass
             qs = qs.filter(q_filter)
-        if tienda_id:
-            empresa_filter = {} if es_superadmin(self.request) else \
-                {"inventarios__tienda__empresa": get_empresa(self.request)}
-            qs = qs.filter(
-                inventarios__tienda_id=tienda_id,
-                **empresa_filter,
-            ).distinct()
+
+        # tienda_id y alerta se aplican juntos en un solo filter() para
+        # evitar el doble JOIN de Django sobre la misma tabla relacionada
+        if tienda_id or alerta:
+            inv = {}
+            if tienda_id:
+                inv['inventarios__tienda_id'] = tienda_id
+                if not es_superadmin(self.request):
+                    inv['inventarios__tienda__empresa'] = get_empresa(self.request)
+            if alerta == "agotado":
+                inv['inventarios__stock_actual__lte'] = 0
+            elif alerta == "bajo":
+                inv['inventarios__stock_actual__lte'] = F('inventarios__stock_minimo')
+                inv['inventarios__stock_actual__gt']  = 0
+            elif alerta == "con_averias":
+                inv['inventarios__stock_averias__gt'] = 0
+            if inv:
+                qs = qs.filter(**inv).distinct()
+
         return qs
 
     @transaction.atomic
@@ -352,7 +372,8 @@ class InventarioListView(generics.ListAPIView):
         if categoria:  qs = qs.filter(producto__categoria_id=categoria)
         if q:          qs = qs.filter(
             Q(producto__nombre__icontains=q) |
-            Q(producto__codigo_barras__icontains=q)
+            Q(producto__codigo_barras__icontains=q) |
+            Q(producto__categoria__nombre__icontains=q)
         )
         if precio_min: qs = qs.filter(producto__precio_venta__gte=precio_min)
         if precio_max: qs = qs.filter(producto__precio_venta__lte=precio_max)

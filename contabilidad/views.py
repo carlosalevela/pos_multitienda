@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, F, Q, Sum
+from django.db.models import Case, Count, DecimalField, F, Max, Min, Q, Sum, Value, When
 from django.db.models.functions import Coalesce, TruncDate, TruncMonth
 from django.http import HttpResponse
 from django.utils import timezone
@@ -781,29 +781,94 @@ class VentasPorEmpleadoView(APIView):
         )
         ventas_qs = scope_qs(request, ventas_qs, tienda_id=tienda_id)
 
+        _dec = DecimalField(max_digits=12, decimal_places=2)
+
         data = (
             ventas_qs
             .values("empleado_id", "empleado__nombre", "empleado__apellido")
             .annotate(
-                num_ventas=Count("id"),
-                total_ventas=Sum("total"),
-                total_descuentos=Sum("descuento_total"),
+                num_ventas       = Count("id"),
+                total_ventas     = Sum("total"),
+                total_descuentos = Sum("descuento_total"),
+                venta_max        = Max("total"),
+                venta_min        = Min("total"),
+                ventas_efectivo  = Sum(Case(
+                    When(metodo_pago="efectivo", then=F("total")),
+                    default=Value(0), output_field=_dec,
+                )),
+                ventas_tarjeta   = Sum(Case(
+                    When(metodo_pago="tarjeta", then=F("total")),
+                    default=Value(0), output_field=_dec,
+                )),
+                ventas_transf    = Sum(Case(
+                    When(metodo_pago="transferencia", then=F("total")),
+                    default=Value(0), output_field=_dec,
+                )),
+                ventas_mixto     = Sum(Case(
+                    When(metodo_pago="mixto", then=F("total")),
+                    default=Value(0), output_field=_dec,
+                )),
+                ventas_credito   = Sum(Case(
+                    When(metodo_pago="credito", then=F("total")),
+                    default=Value(0), output_field=_dec,
+                )),
             )
             .order_by("-total_ventas")
         )
+
+        # Devoluciones agrupadas por empleado en el mismo período
+        dev_qs = Devolucion.objects.filter(
+            estado="procesada",
+            created_at__date__gte=fecha_ini,
+            created_at__date__lte=fecha_fin,
+        )
+        dev_qs = scope_qs(request, dev_qs, tienda_id=tienda_id)
+        dev_map = {
+            d["empleado_id"]: d
+            for d in dev_qs.values("empleado_id").annotate(
+                num_dev   = Count("id"),
+                total_dev = Sum("total_devuelto"),
+            )
+        }
+
+        # Ventas por día por empleado (para sparkline)
+        daily_map: dict = {}
+        for row in (
+            ventas_qs
+            .values("empleado_id", dia=TruncDate("created_at"))
+            .annotate(total_dia=Sum("total"))
+            .order_by("empleado_id", "dia")
+        ):
+            eid = row["empleado_id"]
+            daily_map.setdefault(eid, []).append({
+                "fecha": str(row["dia"]),
+                "total": float(row["total_dia"] or 0),
+            })
 
         empleados = []
         for r in data:
             total  = float(r["total_ventas"] or 0)
             num    = r["num_ventas"] or 0
             nombre = f"{r['empleado__nombre'] or ''} {r['empleado__apellido'] or ''}".strip()
+            eid    = r["empleado_id"]
+            dev    = dev_map.get(eid, {})
             empleados.append({
-                "empleado_id":      r["empleado_id"],
-                "nombre":           nombre or "Sin asignar",
-                "num_ventas":       num,
-                "total_ventas":     total,
-                "total_descuentos": float(r["total_descuentos"] or 0),
-                "promedio_venta":   round(total / num, 2) if num else 0.0,
+                "empleado_id":         eid,
+                "nombre":              nombre or "Sin asignar",
+                "num_ventas":          num,
+                "total_ventas":        total,
+                "total_descuentos":    float(r["total_descuentos"] or 0),
+                "promedio_venta":      round(total / num, 2) if num else 0.0,
+                "venta_max":           float(r["venta_max"] or 0),
+                "venta_min":           float(r["venta_min"] or 0),
+                "ventas_efectivo":     float(r["ventas_efectivo"] or 0),
+                "ventas_tarjeta":      float(r["ventas_tarjeta"] or 0),
+                "ventas_transferencia":float(r["ventas_transf"] or 0),
+                "ventas_mixto":        float(r["ventas_mixto"] or 0),
+                "ventas_credito":      float(r["ventas_credito"] or 0),
+                "num_devoluciones":    dev.get("num_dev") or 0,
+                "total_devoluciones":  float(dev.get("total_dev") or 0),
+                "ventas_por_dia":      daily_map.get(eid, []),
             })
 
         return Response({
@@ -992,6 +1057,15 @@ class FlujoCajaView(APIView):
             ).values("sesion_id").annotate(total=Sum("monto"))
         }
 
+        # ── Cambios cobrados por sesión (ingreso de diferencia en cambios) ──
+        cambios_cobrar_map = {
+            d["venta__sesion_caja_id"]: float(d["total"] or 0)
+            for d in Devolucion.objects.filter(
+                venta__sesion_caja_id__in=sesion_ids,
+                estado="procesada", tipo="cambio", tipo_diferencia="cobrar",
+            ).values("venta__sesion_caja_id").annotate(total=Sum("diferencia"))
+        }
+
         # ── Devoluciones por sesión ───────────────────────────
         dev_map = {
             d["venta__sesion_caja_id"]: float(d["total"] or 0)
@@ -1009,10 +1083,11 @@ class FlujoCajaView(APIView):
             v_transferencia = vm.get("transferencia", 0)
             v_mixto         = vm.get("mixto", 0)
             abonos          = abonos_map.get(s.id, 0)
+            cambios_cobrar  = cambios_cobrar_map.get(s.id, 0)
             gastos          = gastos_map.get(s.id, 0)
             devoluciones    = dev_map.get(s.id, 0)
 
-            total_entradas = v_efectivo + v_tarjeta + v_transferencia + v_mixto + abonos
+            total_entradas = v_efectivo + v_tarjeta + v_transferencia + v_mixto + abonos + cambios_cobrar
             total_salidas  = gastos + devoluciones
 
             sesiones.append({
@@ -1030,6 +1105,7 @@ class FlujoCajaView(APIView):
                     "ventas_transferencia": v_transferencia,
                     "ventas_mixto":         v_mixto,
                     "abonos":               abonos,
+                    "cambios_cobrar":       cambios_cobrar,
                     "total":                round(total_entradas, 2),
                 },
                 "salidas": {
@@ -1605,6 +1681,13 @@ class ExportarContabilidadView(APIView):
             for a in MovimientoCaja.objects.filter(sesion_id__in=sesion_ids, tipo="abono_separado")
             .values("sesion_id").annotate(total=Sum("monto"))
         }
+        cambios_cobrar_map = {
+            d["venta__sesion_caja_id"]: float(d["total"] or 0)
+            for d in Devolucion.objects.filter(
+                venta__sesion_caja_id__in=sesion_ids,
+                estado="procesada", tipo="cambio", tipo_diferencia="cobrar",
+            ).values("venta__sesion_caja_id").annotate(total=Sum("diferencia"))
+        }
         dev_map = {
             d["venta__sesion_caja_id"]: float(d["total"] or 0)
             for d in Devolucion.objects.filter(
@@ -1618,9 +1701,10 @@ class ExportarContabilidadView(APIView):
             vef = vm.get("efectivo", 0); vtar = vm.get("tarjeta", 0)
             vtr = vm.get("transferencia", 0); vmx = vm.get("mixto", 0)
             ab  = abonos_map.get(s.id, 0)
+            cc  = cambios_cobrar_map.get(s.id, 0)
             gas = gastos_map.get(s.id, 0)
             dev = dev_map.get(s.id, 0)
-            ent = round(vef + vtar + vtr + vmx + ab, 2)
+            ent = round(vef + vtar + vtr + vmx + ab + cc, 2)
             sal = round(gas + dev, 2)
             sesiones.append({
                 "sesion_id": s.id, "fecha": s.fecha_apertura.date().isoformat(),
@@ -1630,7 +1714,7 @@ class ExportarContabilidadView(APIView):
                 "entradas": {
                     "ventas_efectivo": vef, "ventas_tarjeta": vtar,
                     "ventas_transferencia": vtr, "ventas_mixto": vmx,
-                    "abonos": ab, "total": ent,
+                    "abonos": ab, "cambios_cobrar": cc, "total": ent,
                 },
                 "salidas": {"gastos": gas, "devoluciones": dev, "total": sal},
                 "flujo_sesion": round(ent - sal, 2),

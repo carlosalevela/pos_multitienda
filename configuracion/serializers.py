@@ -45,6 +45,10 @@ class ConfigTiendaSerializer(serializers.ModelSerializer):
 
 
 class ConfigImpresionSerializer(serializers.ModelSerializer):
+    nit       = serializers.CharField(source='tienda.nit',       read_only=True, default='')
+    direccion = serializers.CharField(source='tienda.direccion', read_only=True, default='')
+    telefono  = serializers.CharField(source='tienda.telefono',  read_only=True, default='')
+
     class Meta:
         model  = ConfigImpresion
         fields = [
@@ -52,9 +56,10 @@ class ConfigImpresionSerializer(serializers.ModelSerializer):
             "tipo_papel", "copias",
             "mostrar_logo", "mostrar_nit",
             "mensaje_pie", "nombre_dispositivo",
+            "nit", "direccion", "telefono",
             "updated_at",
         ]
-        read_only_fields = ["id", "tienda", "updated_at"]
+        read_only_fields = ["id", "tienda", "nit", "direccion", "telefono", "updated_at"]
 
     def validate_copias(self, value):
         if value < 1 or value > 5:

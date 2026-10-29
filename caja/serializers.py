@@ -359,9 +359,15 @@ class SesionCajaSerializer(serializers.ModelSerializer):
 
     def get_devoluciones_detalle(self, obj):
         from devoluciones.models import Devolucion
+        cierre = obj.fecha_cierre or timezone.now()
         devs = (
             Devolucion.objects
-            .filter(venta__sesion_caja=obj, estado="procesada")
+            .filter(
+                tienda=obj.tienda,
+                estado="procesada",
+                created_at__gte=obj.fecha_apertura,
+                created_at__lte=cierre,
+            )
             .select_related("venta", "cuenta_destino", "producto_reemplazo")
             .prefetch_related("detalles__producto")
             .order_by("created_at")

@@ -184,13 +184,21 @@ class AjusteInventarioSerializer(serializers.Serializer):
 
 
 class MovimientoInventarioSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
-    empleado_nombre = serializers.SerializerMethodField()
+    producto_nombre  = serializers.CharField(source="producto.nombre", read_only=True)
+    categoria_nombre = serializers.CharField(
+        source="producto.categoria.nombre", read_only=True, default="")
+    precio_venta     = serializers.DecimalField(
+        source="producto.precio_venta", max_digits=12, decimal_places=2,
+        read_only=True, default=0)
+    codigo_barras    = serializers.CharField(
+        source="producto.codigo_barras", read_only=True, default="")
+    empleado_nombre  = serializers.SerializerMethodField()
 
     class Meta:
         model  = MovimientoInventario
         fields = [
-            "id", "producto", "producto_nombre",
+            "id", "producto", "producto_nombre", "categoria_nombre",
+            "precio_venta", "codigo_barras",
             "tienda", "empleado", "empleado_nombre",
             "tipo", "cantidad", "referencia_tipo",
             "observacion", "created_at",

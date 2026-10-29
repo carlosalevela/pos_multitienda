@@ -384,10 +384,14 @@ class ResumenCierreView(APIView):
         cs_efectivo     = agg(base_cs.filter(metodo_pago="efectivo"))
         im_efectivo     = agg(base_im.filter(metodo_pago="efectivo"))
 
-        dev_efectivo     = dsum(base_d.filter(tipo="devolucion", metodo_devolucion="efectivo"))
-        cambios_cobrar   = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo"))
-        cambios_devolver = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo"))
-        neto_dev_efectivo = dev_efectivo + cambios_devolver - cambios_cobrar
+        dev_efectivo       = dsum(base_d.filter(tipo="devolucion", metodo_devolucion="efectivo"))
+        cambios_cobrar     = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo"))
+        cambios_devolver   = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo"))
+        cambios_cobrar_tar = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="tarjeta"))
+        cambios_dev_tar    = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="tarjeta"))
+        cambios_cobrar_tra = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="transferencia"))
+        cambios_dev_tra    = ddsum(base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="transferencia"))
+        neto_dev_efectivo  = dev_efectivo + cambios_devolver - cambios_cobrar
 
         # Ventas detalle (productos por transacción)
         ventas_detalle = []
@@ -490,15 +494,19 @@ class ResumenCierreView(APIView):
                 "detalle":                detalle_abonos,
             },
             "devoluciones": {
-                "efectivo":         float(dev_efectivo),
-                "cambios_cobrar":   float(cambios_cobrar),
-                "cambios_devolver": float(cambios_devolver),
-                "neto_efectivo":    float(neto_dev_efectivo),
-                "cantidad":         base_d.count(),
-                "cambios_producto": base_d.filter(
+                "efectivo":           float(dev_efectivo),
+                "cambios_cobrar":     float(cambios_cobrar),
+                "cambios_devolver":   float(cambios_devolver),
+                "neto_efectivo":      float(neto_dev_efectivo),
+                "cambios_cobrar_tar": float(cambios_cobrar_tar),
+                "cambios_devolver_tar": float(cambios_dev_tar),
+                "cambios_cobrar_tra": float(cambios_cobrar_tra),
+                "cambios_devolver_tra": float(cambios_dev_tra),
+                "cantidad":           base_d.count(),
+                "cambios_producto":   base_d.filter(
                     tipo="cambio", producto_reemplazo__isnull=False
                 ).count(),
-                "detalle":          detalle_devs,
+                "detalle":            detalle_devs,
             },
             "anulaciones": {
                 "cantidad":      base_anuladas.count(),

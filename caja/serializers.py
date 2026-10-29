@@ -43,6 +43,11 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     devoluciones_efectivo = serializers.SerializerMethodField()
     num_devoluciones      = serializers.SerializerMethodField()
     num_cambios_producto  = serializers.SerializerMethodField()
+    cambios_cobrar_ef     = serializers.SerializerMethodField()
+    cambios_cobrar_tar    = serializers.SerializerMethodField()
+    cambios_devolver_tar  = serializers.SerializerMethodField()
+    cambios_cobrar_tra    = serializers.SerializerMethodField()
+    cambios_devolver_tra  = serializers.SerializerMethodField()
     # Cuadre
     monto_esperado        = serializers.SerializerMethodField()
 
@@ -61,6 +66,8 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             "abonos_efectivo", "abonos_tarjeta", "abonos_transferencia",
             "abonos_total", "abonos_credito_efectivo", "num_abonos",
             "devoluciones_efectivo", "num_devoluciones", "num_cambios_producto",
+            "cambios_cobrar_ef", "cambios_cobrar_tar", "cambios_devolver_tar",
+            "cambios_cobrar_tra", "cambios_devolver_tra",
             "monto_esperado",
         ]
 
@@ -122,6 +129,24 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     # ── devoluciones ─────────────────────────────────────────
 
     def get_devoluciones_efectivo(self, obj): return float(self._dev_neto_ef(obj))
+
+    def _dev_cambios_por_metodo(self, obj):
+        if not hasattr(obj, "_resumen_dev_metodos"):
+            from devoluciones.models import Devolucion
+            base = Devolucion.objects.filter(venta__sesion_caja=obj, estado="procesada")
+            cobrar_ef  = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0)
+            cobrar_tar = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="tarjeta").aggregate(t=Sum("diferencia"))["t"] or 0)
+            dev_tar    = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="tarjeta").aggregate(t=Sum("diferencia"))["t"] or 0)
+            cobrar_tra = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="transferencia").aggregate(t=Sum("diferencia"))["t"] or 0)
+            dev_tra    = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="transferencia").aggregate(t=Sum("diferencia"))["t"] or 0)
+            obj._resumen_dev_metodos = (cobrar_ef, cobrar_tar, dev_tar, cobrar_tra, dev_tra)
+        return obj._resumen_dev_metodos
+
+    def get_cambios_cobrar_ef(self, obj):     return self._dev_cambios_por_metodo(obj)[0]
+    def get_cambios_cobrar_tar(self, obj):    return self._dev_cambios_por_metodo(obj)[1]
+    def get_cambios_devolver_tar(self, obj):  return self._dev_cambios_por_metodo(obj)[2]
+    def get_cambios_cobrar_tra(self, obj):    return self._dev_cambios_por_metodo(obj)[3]
+    def get_cambios_devolver_tra(self, obj):  return self._dev_cambios_por_metodo(obj)[4]
 
     def get_num_devoluciones(self, obj):
         from devoluciones.models import Devolucion
@@ -192,6 +217,10 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     devoluciones_directas_ef = serializers.SerializerMethodField()
     cambios_cobrar_ef        = serializers.SerializerMethodField()
     cambios_devolver_ef      = serializers.SerializerMethodField()
+    cambios_cobrar_tar       = serializers.SerializerMethodField()
+    cambios_devolver_tar     = serializers.SerializerMethodField()
+    cambios_cobrar_tra       = serializers.SerializerMethodField()
+    cambios_devolver_tra     = serializers.SerializerMethodField()
     num_devoluciones         = serializers.SerializerMethodField()
     num_cambios_producto     = serializers.SerializerMethodField()
     abonos_efectivo          = serializers.SerializerMethodField()
@@ -220,6 +249,8 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "ventas_detalle", "devoluciones_detalle",
             "devoluciones_efectivo", "devoluciones_directas_ef",
             "cambios_cobrar_ef", "cambios_devolver_ef",
+            "cambios_cobrar_tar", "cambios_devolver_tar",
+            "cambios_cobrar_tra", "cambios_devolver_tra",
             "num_devoluciones", "num_cambios_producto",
             "abonos_efectivo", "abonos_tarjeta",
             "abonos_transferencia", "abonos_total",
@@ -389,11 +420,15 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     def _dev_cache_all(self, obj):
         if not hasattr(self, "_dev_full_cache"):
             from devoluciones.models import Devolucion
-            base     = Devolucion.objects.filter(venta__sesion_caja=obj, estado="procesada")
-            dev      = float(base.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or 0)
-            cobrar   = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0)
-            devolver = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0)
-            self._dev_full_cache = (dev, cobrar, devolver)
+            base         = Devolucion.objects.filter(venta__sesion_caja=obj, estado="procesada")
+            dev          = float(base.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or 0)
+            cobrar       = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0)
+            devolver     = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or 0)
+            cobrar_tar   = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="tarjeta").aggregate(t=Sum("diferencia"))["t"] or 0)
+            devolver_tar = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="tarjeta").aggregate(t=Sum("diferencia"))["t"] or 0)
+            cobrar_tra   = float(base.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="transferencia").aggregate(t=Sum("diferencia"))["t"] or 0)
+            devolver_tra = float(base.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="transferencia").aggregate(t=Sum("diferencia"))["t"] or 0)
+            self._dev_full_cache = (dev, cobrar, devolver, cobrar_tar, devolver_tar, cobrar_tra, devolver_tra)
         return self._dev_full_cache
 
     def _dev_efectivo_neto(self, obj) -> Decimal:
@@ -404,6 +439,10 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     def get_devoluciones_directas_ef(self, obj): return self._dev_cache_all(obj)[0]
     def get_cambios_cobrar_ef(self, obj):        return self._dev_cache_all(obj)[1]
     def get_cambios_devolver_ef(self, obj):      return self._dev_cache_all(obj)[2]
+    def get_cambios_cobrar_tar(self, obj):       return self._dev_cache_all(obj)[3]
+    def get_cambios_devolver_tar(self, obj):     return self._dev_cache_all(obj)[4]
+    def get_cambios_cobrar_tra(self, obj):       return self._dev_cache_all(obj)[5]
+    def get_cambios_devolver_tra(self, obj):     return self._dev_cache_all(obj)[6]
 
     def get_num_devoluciones(self, obj):
         from devoluciones.models import Devolucion

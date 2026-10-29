@@ -21,12 +21,14 @@ class PagoVentaSerializer(serializers.ModelSerializer):
 
 
 class DetalleVentaSerializer(serializers.ModelSerializer):
-    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+    producto_nombre  = serializers.CharField(source="producto.nombre", read_only=True)
+    categoria_nombre = serializers.CharField(
+        source="producto.categoria.nombre", read_only=True, default="")
 
     class Meta:
         model  = DetalleVenta
         fields = [
-            "id", "producto", "producto_nombre",
+            "id", "producto", "producto_nombre", "categoria_nombre",
             "cantidad", "precio_unitario",
             "descuento", "subtotal"
         ]

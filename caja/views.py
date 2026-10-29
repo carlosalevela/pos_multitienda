@@ -135,7 +135,12 @@ class CerrarCajaView(APIView):
         cancelaciones_efectivo = base_cs.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         ingresos_manual        = base_im.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-        base_d = Devolucion.objects.filter(venta__sesion_caja=sesion, estado="procesada")
+        base_d = Devolucion.objects.filter(
+            tienda=sesion.tienda,
+            estado="procesada",
+            created_at__gte=sesion.fecha_apertura,
+            created_at__lte=timezone.now(),
+        )
         dev_efectivo     = base_d.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
         cambios_cobrar   = base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
         cambios_devolver = base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
@@ -341,7 +346,13 @@ class ResumenCierreView(APIView):
 
         base_v = Venta.objects.filter(sesion_caja=sesion, estado="completada")
         base_g = Gasto.objects.filter(sesion_caja=sesion)
-        base_d = Devolucion.objects.filter(venta__sesion_caja=sesion, estado="procesada")
+        _cierre_dt = sesion.fecha_cierre or timezone.now()
+        base_d = Devolucion.objects.filter(
+            tienda=sesion.tienda,
+            estado="procesada",
+            created_at__gte=sesion.fecha_apertura,
+            created_at__lte=_cierre_dt,
+        )
 
         v_efectivo      = vsum(base_v.filter(metodo_pago="efectivo"))
         v_tarjeta       = vsum(base_v.filter(metodo_pago="tarjeta"))

@@ -432,7 +432,8 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         return self._dev_full_cache
 
     def _dev_efectivo_neto(self, obj) -> Decimal:
-        dev, cobrar, devolver = self._dev_cache_all(obj)
+        c = self._dev_cache_all(obj)
+        dev, cobrar, devolver = c[0], c[1], c[2]
         return Decimal(str(dev + devolver - cobrar))
 
     def get_devoluciones_efectivo(self, obj):    return float(self._dev_efectivo_neto(obj))

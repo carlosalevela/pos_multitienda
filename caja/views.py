@@ -298,7 +298,7 @@ class SesionCajaListView(generics.ListAPIView):
         mis_sesiones = self.request.query_params.get("mis_sesiones")
 
         if tienda_id:    qs = qs.filter(tienda_id=tienda_id)
-        if fecha:        qs = qs.filter(fecha_apertura__date=fecha)
+        if fecha:        qs = qs.filter(Q(fecha_apertura__date=fecha) | Q(fecha_cierre__date=fecha))
         if mis_sesiones: qs = qs.filter(empleado=self.request.user)
         return qs.filter(estado=estado)
 

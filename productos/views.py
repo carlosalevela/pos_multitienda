@@ -516,10 +516,9 @@ class ImportarProductosView(APIView):
         "descripcion":      "descripcion",
         "descripción":      "descripcion",
         "codigo_barras":    "codigo_barras",
-        "código de barras": "codigo_barras",
+        "codigo de barras": "codigo_barras",
         "codigo barras":    "codigo_barras",
         "codigo":           "codigo_barras",
-        "código":           "codigo_barras",
         "categoria":        "categoria_nombre",
         "categoría":        "categoria_nombre",
         "categoria_nombre": "categoria_nombre",
@@ -546,6 +545,14 @@ class ImportarProductosView(APIView):
         "product name":         "nombre",
     }
 
+    @staticmethod
+    def _norm_header(h):
+        import unicodedata
+        s = str(h).strip().lower() if h is not None else ""
+        # Quita acentos para que "mínimo"=="minimo", "máximo"=="maximo", etc.
+        s = unicodedata.normalize("NFKD", s)
+        return "".join(c for c in s if not unicodedata.combining(c))
+
     def _parsear_excel(self, archivo):
         import openpyxl
         try:
@@ -564,7 +571,7 @@ class ImportarProductosView(APIView):
         field_indices  = {}
         for attempt in range(min(6, len(filas))):
             raw_headers = [
-                str(h).strip().lower() if h is not None else ""
+                self._norm_header(h)
                 for h in filas[attempt]
             ]
             indices = {}

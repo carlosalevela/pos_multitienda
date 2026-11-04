@@ -239,6 +239,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     ingresos_manual          = serializers.SerializerMethodField()
     num_abonos               = serializers.SerializerMethodField()
     monto_esperado           = serializers.SerializerMethodField()
+    cuentas_resumen          = serializers.SerializerMethodField()
 
     class Meta:
         model  = SesionCaja
@@ -262,7 +263,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "abonos_transferencia", "abonos_total",
             "abonos_credito_efectivo", "abonos_detalle",
             "cancelaciones_efectivo", "ingresos_manual",
-            "num_abonos", "monto_esperado",
+            "num_abonos", "monto_esperado", "cuentas_resumen",
         ]
         read_only_fields = [
             "id", "empleado", "fecha_apertura", "fecha_cierre",
@@ -473,6 +474,64 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         return self._base_dev_hist(obj).filter(
             tipo="cambio", producto_reemplazo__isnull=False,
         ).count()
+
+    # ── Cuentas bancarias del turno ───────────────────────────
+
+    def get_cuentas_resumen(self, obj):
+        from configuracion.models import CuentaBancaria
+        from ventas.models import Venta
+        from .models import MovimientoCaja
+        from django.db.models import Q
+
+        cuentas = CuentaBancaria.objects.filter(
+            empresa=obj.tienda.empresa,
+        ).filter(
+            Q(tienda=obj.tienda) | Q(tienda__isnull=True)
+        )
+
+        # Ventas por cuenta
+        base_ventas = Venta.objects.filter(
+            tienda=obj.tienda, estado="completada", cuenta_destino__isnull=False
+        )
+        sesion_totals = {}
+        for row in (base_ventas.filter(sesion_caja=obj)
+                    .values("cuenta_destino_id").annotate(t=Sum("total"))):
+            sesion_totals[row["cuenta_destino_id"]] = float(row["t"] or 0)
+        acum_totals = {}
+        for row in base_ventas.values("cuenta_destino_id").annotate(t=Sum("total")):
+            acum_totals[row["cuenta_destino_id"]] = float(row["t"] or 0)
+
+        # Abonos separados no-efectivo por cuenta
+        base_abonos = MovimientoCaja.objects.filter(
+            sesion__tienda=obj.tienda,
+            tipo="abono_separado",
+            cuenta_bancaria__isnull=False,
+            metodo_pago__in=["tarjeta", "transferencia"],
+        )
+        for row in (base_abonos.filter(sesion=obj)
+                    .values("cuenta_bancaria_id").annotate(t=Sum("monto"))):
+            cid = row["cuenta_bancaria_id"]
+            sesion_totals[cid] = sesion_totals.get(cid, 0) + float(row["t"] or 0)
+        for row in base_abonos.values("cuenta_bancaria_id").annotate(t=Sum("monto")):
+            cid = row["cuenta_bancaria_id"]
+            acum_totals[cid] = acum_totals.get(cid, 0) + float(row["t"] or 0)
+
+        result = []
+        for c in cuentas:
+            sesion_t = sesion_totals.get(c.id, 0)
+            acum_t   = acum_totals.get(c.id, 0)
+            if sesion_t == 0 and acum_t == 0:
+                continue
+            result.append({
+                "id":              c.id,
+                "nombre":          c.nombre,
+                "tipo":            c.tipo,
+                "tipo_display":    c.get_tipo_display(),
+                "numero":          c.numero,
+                "sesion_total":    sesion_t,
+                "total_acumulado": acum_t,
+            })
+        return result
 
     # ── Monto esperado ────────────────────────────────────────
 

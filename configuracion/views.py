@@ -212,12 +212,14 @@ class CuentaBancariaDetailView(APIView):
 class ResumenCuentasView(APIView):
     """
     GET /api/config/cuentas/<tienda_id>/resumen/?sesion_id=X
-    Retorna por cuenta: total de esa sesión + acumulado histórico (ventas completadas).
+    Retorna por cuenta: total de esa sesión + acumulado histórico
+    (ventas completadas + abonos separados no-efectivo).
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request, tienda_id):
         from ventas.models import Venta
+        from caja.models import MovimientoCaja
 
         tienda, err = _get_tienda(request, tienda_id)
         if err:
@@ -231,6 +233,7 @@ class ResumenCuentasView(APIView):
             models.Q(tienda=tienda) | models.Q(tienda__isnull=True)
         )
 
+        # ── Ventas por cuenta ──────────────────────────────────
         base_ventas = Venta.objects.filter(
             tienda=tienda, estado="completada",
             cuenta_destino__isnull=False,
@@ -250,6 +253,29 @@ class ResumenCuentasView(APIView):
                     .annotate(t=Sum("total"))):
             acum_totals[row["cuenta_destino_id"]] = float(row["t"] or 0)
 
+        # ── Abonos separados no-efectivo por cuenta ────────────
+        base_abonos = MovimientoCaja.objects.filter(
+            sesion__tienda=tienda,
+            tipo="abono_separado",
+            cuenta_bancaria__isnull=False,
+            metodo_pago__in=["tarjeta", "transferencia"],
+        )
+
+        if sesion_id:
+            for row in (base_abonos
+                        .filter(sesion_id=sesion_id)
+                        .values("cuenta_bancaria_id")
+                        .annotate(t=Sum("monto"))):
+                cid = row["cuenta_bancaria_id"]
+                sesion_totals[cid] = sesion_totals.get(cid, 0) + float(row["t"] or 0)
+
+        for row in (base_abonos
+                    .values("cuenta_bancaria_id")
+                    .annotate(t=Sum("monto"))):
+            cid = row["cuenta_bancaria_id"]
+            acum_totals[cid] = acum_totals.get(cid, 0) + float(row["t"] or 0)
+
+        # ── Resultado ──────────────────────────────────────────
         result = []
         for c in cuentas:
             sesion_t = sesion_totals.get(c.id, 0)
@@ -257,12 +283,12 @@ class ResumenCuentasView(APIView):
             if sesion_t == 0 and acum_t == 0:
                 continue
             result.append({
-                "id":             c.id,
-                "nombre":         c.nombre,
-                "tipo":           c.tipo,
-                "tipo_display":   c.get_tipo_display(),
-                "numero":         c.numero,
-                "sesion_total":   sesion_t,
+                "id":              c.id,
+                "nombre":          c.nombre,
+                "tipo":            c.tipo,
+                "tipo_display":    c.get_tipo_display(),
+                "numero":          c.numero,
+                "sesion_total":    sesion_t,
                 "total_acumulado": acum_t,
             })
 

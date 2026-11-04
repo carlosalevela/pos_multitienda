@@ -683,9 +683,7 @@ class ImportarProductosView(APIView):
                     if not codigo:
                         codigo = generar_codigo_barras_interno()
 
-                    precio_mayoreo = (
-                        d.get("precio_mayoreo") if empresa.maneja_mayoreo else None
-                    )
+                    precio_mayoreo = d.get("precio_mayoreo")
 
                     producto = Producto.objects.create(
                         empresa         = empresa,

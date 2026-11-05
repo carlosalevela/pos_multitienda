@@ -65,6 +65,11 @@ class Producto(models.Model):
     activo              = models.BooleanField(default=True)
     created_at          = models.DateTimeField(auto_now_add=True)
 
+    def save(self, *args, **kwargs):
+        if not self.codigo_barras:
+            self.codigo_barras = generar_codigo_barras_interno()
+        super().save(*args, **kwargs)
+
     def __str__(self):
         return self.nombre
 

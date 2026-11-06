@@ -74,28 +74,28 @@ class Producto(models.Model):
         return self.nombre
 
     def get_precio(self, cantidad: float = 1, tienda=None) -> float:
-        """
-        Retorna el precio correcto según la cantidad y la tienda.
-        Orden de prioridad para el umbral mayoreo:
-          1. producto.cantidad_minima_mayoreo  (per-producto)
-          2. empresa.cantidad_mayoreo          (global de empresa)
-        La tienda puede desactivar mayoreo vía ConfigTienda.habilitar_mayoreo.
-        """
-        if not (self.empresa and self.empresa.maneja_mayoreo):
-            return float(self.precio_venta)
         if self.precio_mayoreo is None:
             return float(self.precio_venta)
 
-        # Verificar toggle de tienda si se proporciona
+        # Config de tienda manda si existe; si no, cae a empresa
         if tienda is not None:
             try:
-                if not tienda.config.habilitar_mayoreo:
+                cfg = tienda.config
+                if not cfg.habilitar_mayoreo:
                     return float(self.precio_venta)
+                umbral = cfg.umbral_mayoreo or (
+                    self.empresa.cantidad_mayoreo if self.empresa else None
+                ) or 0
             except Exception:
-                pass
+                if not (self.empresa and self.empresa.maneja_mayoreo):
+                    return float(self.precio_venta)
+                umbral = self.empresa.cantidad_mayoreo or 0
+        else:
+            if not (self.empresa and self.empresa.maneja_mayoreo):
+                return float(self.precio_venta)
+            umbral = self.empresa.cantidad_mayoreo or 0
 
-        umbral = self.cantidad_minima_mayoreo or self.empresa.cantidad_mayoreo
-        if cantidad >= umbral:
+        if umbral and cantidad >= umbral:
             return float(self.precio_mayoreo)
         return float(self.precio_venta)
 

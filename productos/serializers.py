@@ -26,14 +26,14 @@ class _ProductoInventarioMixin:
         return cache[obj.pk]
 
     def get_maneja_mayoreo(self, obj):
-        # Empresa debe soportar mayoreo primero (condición necesaria)
-        if not (obj.empresa and obj.empresa.maneja_mayoreo):
+        if not obj.empresa:
             return False
-        # La tienda puede desactivarlo individualmente
         cfg = self._get_config_tienda()
-        if cfg is not None and not cfg.habilitar_mayoreo:
-            return False
-        return True
+        if cfg is not None:
+            # Config de tienda explícita: ese valor manda (True o False)
+            return cfg.habilitar_mayoreo
+        # Sin config de tienda: heredar del setting de empresa
+        return bool(obj.empresa.maneja_mayoreo)
 
     def get_cantidad_mayoreo(self, obj):
         return obj.empresa.cantidad_mayoreo if obj.empresa else None

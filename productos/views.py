@@ -166,7 +166,7 @@ class ProductoListCreateView(generics.ListCreateAPIView):
             if inv:
                 qs = qs.filter(**inv).distinct()
 
-        return qs
+        return qs.order_by('nombre')
 
     @transaction.atomic
     def perform_create(self, serializer):

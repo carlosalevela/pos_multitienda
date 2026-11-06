@@ -6,6 +6,7 @@ from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -94,8 +95,15 @@ class CategoriaDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 # ── Productos ─────────────────────────────────────────────
+class _ProductoPagination(PageNumberPagination):
+    page_size            = 100
+    page_size_query_param = 'page_size'
+    max_page_size        = 500
+
+
 class ProductoListCreateView(generics.ListCreateAPIView):
-    serializer_class = ProductoSerializer
+    serializer_class   = ProductoSerializer
+    pagination_class   = _ProductoPagination
 
     def get_permissions(self):
         if self.request.method == 'GET':
@@ -105,13 +113,13 @@ class ProductoListCreateView(generics.ListCreateAPIView):
     def get_queryset(self):
         if es_superadmin(self.request):
             empresa_id = self.request.query_params.get("empresa")
-            qs = Producto.objects.select_related("categoria", "empresa")
+            qs = Producto.objects.select_related("categoria", "empresa").prefetch_related("inventarios")
             if empresa_id:
                 qs = qs.filter(empresa_id=empresa_id)
         else:
             qs = Producto.objects.select_related(
                 "categoria", "empresa"
-            ).filter(empresa=get_empresa(self.request))
+            ).prefetch_related("inventarios").filter(empresa=get_empresa(self.request))
 
         activo = self.request.query_params.get("activo", "true")
         if activo == "true":

@@ -15,10 +15,18 @@ class _ProductoInventarioMixin:
     """Métodos compartidos entre ProductoSerializer y ProductoSimpleSerializer."""
 
     def _get_inventario(self, obj):
-        cache     = self.context.setdefault("_inv_cache", {})
+        # Si el queryset ya viene con prefetch_related('inventarios'), lo usamos
+        # para evitar N+1 queries (1 query total en vez de 1 por producto).
+        request   = self.context.get("request")
+        tienda_id = request.query_params.get("tienda_id") if request else None
+        if hasattr(obj, '_prefetched_objects_cache') and 'inventarios' in obj._prefetched_objects_cache:
+            invs = obj.inventarios.all()
+            if tienda_id:
+                invs = [i for i in invs if str(i.tienda_id) == str(tienda_id)]
+            return invs[0] if invs else None
+        # Fallback: query individual (sin prefetch)
+        cache = self.context.setdefault("_inv_cache", {})
         if obj.pk not in cache:
-            request   = self.context.get("request")
-            tienda_id = request.query_params.get("tienda_id") if request else None
             qs = Inventario.objects.filter(producto=obj)
             if tienda_id:
                 qs = qs.filter(tienda_id=tienda_id)

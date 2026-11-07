@@ -19,11 +19,13 @@ class BonoVenderView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        empresa_id = request.data.get('empresa_id')
-        tienda_id  = request.data.get('tienda_id')
-        valor      = request.data.get('valor')
-        venta_id   = request.data.get('venta_id')
-        cliente_id = request.data.get('cliente_id')
+        empresa_id     = request.data.get('empresa_id')
+        tienda_id      = request.data.get('tienda_id')
+        valor          = request.data.get('valor')
+        venta_id       = request.data.get('venta_id')
+        cliente_id     = request.data.get('cliente_id')
+        metodo_pago    = request.data.get('metodo_pago', 'efectivo')
+        monto_recibido = request.data.get('monto_recibido')
 
         if not empresa_id or not tienda_id or not valor:
             return Response(
@@ -41,15 +43,27 @@ class BonoVenderView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        monto_rec_dec = None
+        if monto_recibido is not None:
+            try:
+                monto_rec_dec = Decimal(str(monto_recibido))
+            except Exception:
+                pass
+
         bono = Bono.objects.create(
-            empresa_id    = empresa_id,
+            empresa_id       = empresa_id,
             tienda_origen_id = tienda_id,
-            valor_original = valor_dec,
-            saldo          = valor_dec,
-            venta_origen_id = venta_id or None,
-            cliente_id     = cliente_id or None,
+            valor_original   = valor_dec,
+            saldo            = valor_dec,
+            metodo_pago      = metodo_pago,
+            monto_recibido   = monto_rec_dec,
+            venta_origen_id  = venta_id or None,
+            cliente_id       = cliente_id or None,
         )
-        return Response(BonoSerializer(bono).data, status=status.HTTP_201_CREATED)
+        vuelta = float(monto_rec_dec - valor_dec) if monto_rec_dec and monto_rec_dec > valor_dec else 0
+        data = BonoSerializer(bono).data
+        data['vuelta'] = vuelta
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class BonoValidarView(APIView):

@@ -38,6 +38,8 @@ class Bono(models.Model):
     cliente           = models.ForeignKey(
         'clientes.Cliente', on_delete=models.SET_NULL,
         null=True, blank=True, related_name='bonos')
+    metodo_pago       = models.CharField(max_length=20, default='efectivo')
+    monto_recibido    = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     fecha_vencimiento = models.DateField()
     created_at        = models.DateTimeField(auto_now_add=True)
 

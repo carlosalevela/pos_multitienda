@@ -14,18 +14,28 @@ from .serializers import (
     ValidarBonoSerializer,
 )
 
+# Mapa de métodos del mini-POS de bonos → choices de Venta
+_METODO_VENTA = {
+    'efectivo':      'efectivo',
+    'tarjeta':       'tarjeta',
+    'transferencia': 'transferencia',
+    'nequi':         'transferencia',
+    'daviplata':     'transferencia',
+}
+
 
 class BonoVenderView(APIView):
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request):
-        empresa_id     = request.data.get('empresa_id')
-        tienda_id      = request.data.get('tienda_id')
-        valor          = request.data.get('valor')
-        venta_id       = request.data.get('venta_id')
-        cliente_id     = request.data.get('cliente_id')
-        metodo_pago    = request.data.get('metodo_pago', 'efectivo')
-        monto_recibido = request.data.get('monto_recibido')
+        empresa_id      = request.data.get('empresa_id')
+        tienda_id       = request.data.get('tienda_id')
+        valor           = request.data.get('valor')
+        cliente_id      = request.data.get('cliente_id')
+        metodo_pago     = request.data.get('metodo_pago', 'efectivo')
+        monto_recibido  = request.data.get('monto_recibido')
+        sesion_caja_id  = request.data.get('sesion_caja_id')
 
         if not empresa_id or not tienda_id or not valor:
             return Response(
@@ -50,6 +60,29 @@ class BonoVenderView(APIView):
             except Exception:
                 pass
 
+        vuelta = max(Decimal('0'), (monto_rec_dec or valor_dec) - valor_dec)
+
+        # ── Crear Venta para que aparezca en reportes ────────────────────────
+        venta_bono = None
+        if sesion_caja_id:
+            from ventas.models import Venta
+            metodo_venta = _METODO_VENTA.get(metodo_pago, 'efectivo')
+            numero_factura = Venta.generar_numero_factura(empresa_id)
+            venta_bono = Venta.objects.create(
+                empresa_id      = empresa_id,
+                tienda_id       = tienda_id,
+                sesion_caja_id  = sesion_caja_id,
+                empleado        = request.user,
+                cliente_id      = cliente_id or None,
+                numero_factura  = numero_factura,
+                subtotal        = valor_dec,
+                total           = valor_dec,
+                metodo_pago     = metodo_venta,
+                monto_recibido  = monto_rec_dec or valor_dec,
+                vuelto          = vuelta,
+                observaciones   = f'Venta de bono de regalo',
+            )
+
         bono = Bono.objects.create(
             empresa_id       = empresa_id,
             tienda_origen_id = tienda_id,
@@ -57,12 +90,19 @@ class BonoVenderView(APIView):
             saldo            = valor_dec,
             metodo_pago      = metodo_pago,
             monto_recibido   = monto_rec_dec,
-            venta_origen_id  = venta_id or None,
+            venta_origen     = venta_bono,
             cliente_id       = cliente_id or None,
         )
-        vuelta = float(monto_rec_dec - valor_dec) if monto_rec_dec and monto_rec_dec > valor_dec else 0
+
+        # Actualizar la observación de la venta con el código generado
+        if venta_bono:
+            venta_bono.observaciones = f'Bono de regalo {bono.codigo}'
+            venta_bono.save(update_fields=['observaciones'])
+
         data = BonoSerializer(bono).data
-        data['vuelta'] = vuelta
+        data['vuelta']          = float(vuelta)
+        data['venta_id']        = venta_bono.id if venta_bono else None
+        data['numero_factura']  = venta_bono.numero_factura if venta_bono else ''
         return Response(data, status=status.HTTP_201_CREATED)
 
 

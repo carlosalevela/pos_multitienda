@@ -33,6 +33,7 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     ventas_transferencia  = serializers.SerializerMethodField()
     ventas_mixto          = serializers.SerializerMethodField()
     ventas_mixto_efectivo = serializers.SerializerMethodField()
+    ventas_bono           = serializers.SerializerMethodField()
     # Abonos separado
     abonos_efectivo       = serializers.SerializerMethodField()
     abonos_tarjeta        = serializers.SerializerMethodField()
@@ -63,7 +64,7 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             "diferencia", "observaciones", "estado",
             "ventas_total", "gastos_total", "num_transacciones",
             "ventas_efectivo", "ventas_tarjeta", "ventas_transferencia",
-            "ventas_mixto", "ventas_mixto_efectivo",
+            "ventas_mixto", "ventas_mixto_efectivo", "ventas_bono",
             "abonos_efectivo", "abonos_tarjeta", "abonos_transferencia",
             "abonos_total", "abonos_credito_efectivo", "num_abonos",
             "devoluciones_efectivo", "num_devoluciones", "num_cambios_producto",
@@ -117,6 +118,7 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     def get_ventas_tarjeta(self, obj):        return self._vsum(obj, "tarjeta")
     def get_ventas_transferencia(self, obj):  return self._vsum(obj, "transferencia")
     def get_ventas_mixto(self, obj):          return self._vsum(obj, "mixto")
+    def get_ventas_bono(self, obj):           return self._vsum(obj, "bono")
 
     def get_ventas_mixto_efectivo(self, obj):
         from ventas.models import PagoVenta, Venta
@@ -214,6 +216,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     ventas_transferencia     = serializers.SerializerMethodField()
     ventas_mixto             = serializers.SerializerMethodField()
     ventas_mixto_efectivo    = serializers.SerializerMethodField()
+    ventas_bono              = serializers.SerializerMethodField()
     num_transacciones        = serializers.SerializerMethodField()
     gastos_total             = serializers.SerializerMethodField()
     gastos_detalle           = serializers.SerializerMethodField()
@@ -251,7 +254,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "monto_final_sistema", "monto_final_real",
             "diferencia", "observaciones", "estado",
             "ventas_total", "ventas_efectivo", "ventas_tarjeta",
-            "ventas_transferencia", "ventas_mixto", "ventas_mixto_efectivo",
+            "ventas_transferencia", "ventas_mixto", "ventas_mixto_efectivo", "ventas_bono",
             "num_transacciones", "gastos_total", "gastos_detalle",
             "ventas_detalle", "devoluciones_detalle",
             "devoluciones_efectivo", "devoluciones_directas_ef",
@@ -296,6 +299,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     def get_ventas_tarjeta(self, obj):       return self._vsum(obj, "tarjeta")
     def get_ventas_transferencia(self, obj): return self._vsum(obj, "transferencia")
     def get_ventas_mixto(self, obj):         return self._vsum(obj, "mixto")
+    def get_ventas_bono(self, obj):          return self._vsum(obj, "bono")
 
     def get_ventas_mixto_efectivo(self, obj):
         from ventas.models import PagoVenta, Venta

@@ -131,17 +131,30 @@ class CustomTokenSerializer(TokenObtainPairSerializer):
         identificador = attrs.get("email", "").strip()
 
         if identificador and "@" not in identificador:
-            empleados = Empleado.objects.filter(cedula=identificador, activo=True)
-            count = empleados.count()
+            qs = Empleado.objects.filter(cedula=identificador, activo=True)
+            count = qs.count()
             if count == 0:
                 raise serializers.ValidationError(
                     {"email": "No se encontró un usuario activo con esa cédula."}
                 )
-            if count > 1:
-                raise serializers.ValidationError(
-                    {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
-                )
-            attrs["email"] = empleados.first().email
+            if count == 1:
+                attrs["email"] = qs.first().email
+            else:
+                # Misma cédula en varias empresas: intentar desambiguar por empresa
+                # pasada como parámetro extra opcional (campo "empresa_id")
+                empresa_id = attrs.get("empresa_id")
+                if empresa_id:
+                    filtrado = qs.filter(empresa_id=empresa_id)
+                    if filtrado.count() == 1:
+                        attrs["email"] = filtrado.first().email
+                    else:
+                        raise serializers.ValidationError(
+                            {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
+                        )
+                else:
+                    raise serializers.ValidationError(
+                        {"email": "Cédula ambigua. Usa tu correo electrónico para ingresar."}
+                    )
 
         data = super().validate(attrs)
         empleado = self.user

@@ -796,7 +796,12 @@ class EnviarPdfWhatsAppView(APIView):
         filename  = f"CIERRE_{sesion.id}_{fecha}_{sesion.tienda.nombre.replace(' ', '_')}.pdf"
         caption   = f"Cierre de Caja #{sesion.id} - {sesion.tienda.nombre} ({fecha})"
 
-        from configuracion.whatsapp_service import enviar_pdf_cierre_template
+        from configuracion.whatsapp_service import (
+            enviar_pdf_cierre_template,
+            enviar_cierre_turno,
+        )
+
+        # 1 — PDF template
         resultado = enviar_pdf_cierre_template(
             empresa_id=sesion.tienda.empresa_id,
             tienda_id=sesion.tienda_id,
@@ -806,10 +811,66 @@ class EnviarPdfWhatsAppView(APIView):
             fecha=fecha,
         )
 
-        if resultado["enviados"] == 0:
-            return Response(
-                {"error": "No se pudo enviar el PDF.", "detalle": resultado["errores"]},
-                status=502,
+        # 2 — Texto de resumen (mismo bloque que el cierre automático)
+        try:
+            base_v = Venta.objects.filter(sesion_caja=sesion, estado="completada")
+            _v_ef  = base_v.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tar = base_v.filter(metodo_pago="tarjeta").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tra = base_v.filter(metodo_pago="transferencia").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_mix = base_v.filter(metodo_pago="mixto").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _num_v = base_v.count()
+
+            from django.utils import timezone as _tz
+            _fecha_dt = _tz.localtime(sesion.fecha_cierre or _tz.now())
+            _meses = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+                      "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
+            _fecha_str = (
+                f"{_fecha_dt.day} {_meses[_fecha_dt.month]} {_fecha_dt.year}, "
+                f"{_fecha_dt.hour:02d}:{_fecha_dt.minute:02d}"
+            )
+            _nombre_emp = (
+                f"{sesion.empleado.nombre} {sesion.empleado.apellido}"
+                if sesion.empleado else "—"
             )
 
-        return Response(resultado)
+            from contabilidad.models import Gasto as _Gasto
+            _gastos_total = _Gasto.objects.filter(
+                sesion_caja=sesion
+            ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+            enviar_cierre_turno(
+                empresa_id=sesion.tienda.empresa_id,
+                tienda_id=sesion.tienda_id,
+                datos={
+                    "tienda_nombre":          sesion.tienda.nombre,
+                    "colaborador_nombre":     _nombre_emp,
+                    "fecha_cierre":           _fecha_str,
+                    "monto_inicial":          float(sesion.monto_inicial),
+                    "ventas": {
+                        "total":             float(_v_ef + _v_tar + _v_tra + _v_mix),
+                        "efectivo":          float(_v_ef),
+                        "tarjeta":           float(_v_tar),
+                        "transferencia":     float(_v_tra),
+                        "mixto":             float(_v_mix),
+                        "num_transacciones": _num_v,
+                    },
+                    "abonos_separados":       {"total": 0, "efectivo": 0, "cantidad": 0},
+                    "credito_efectivo":       float(sesion.monto_final_real or 0),
+                    "cancelaciones_efectivo": 0,
+                    "ingresos_manual":        0,
+                    "devoluciones_neto_ef":   0,
+                    "total_gastos":           float(_gastos_total),
+                    "monto_esperado":         float(sesion.monto_final_sistema or 0),
+                    "monto_contado":          float(sesion.monto_final_real or 0),
+                    "diferencia":             float(sesion.diferencia or 0),
+                },
+            )
+        except Exception as _exc:
+            import logging as _log
+            _log.getLogger(__name__).error("WA reenviar resumen error: %s", _exc)
+
+        return Response({
+            "success":  resultado["enviados"] > 0,
+            "enviados": resultado["enviados"],
+            "errores":  resultado["errores"],
+        })

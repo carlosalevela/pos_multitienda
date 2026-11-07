@@ -9,6 +9,7 @@ class Venta(models.Model):
         ("transferencia", "Transferencia"),
         ("mixto",         "Mixto"),
         ("credito",       "Crédito"),
+        ("bono",          "Bono"),
     ]
     ESTADOS = [
         ("completada", "Completada"),

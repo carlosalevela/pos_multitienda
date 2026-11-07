@@ -84,8 +84,41 @@ class CrearVentaView(APIView):
                     )
                 }, status=400)
 
+        # Validar bono ANTES de crear la venta (dentro del atomic)
+        codigo_bono = request.data.get('codigo_bono')
+        bono_obj = None
+        if codigo_bono:
+            from bonos.models import Bono, UsoBono
+            try:
+                bono_obj = Bono.objects.select_for_update().get(
+                    codigo=str(codigo_bono).strip().upper())
+            except Bono.DoesNotExist:
+                return Response({'error': 'Código de bono no encontrado'}, status=400)
+            if not bono_obj.esta_vigente:
+                return Response(
+                    {'error': f'El bono no está vigente (estado: {bono_obj.estado})'},
+                    status=400)
+
         venta = serializer.save(empleado=request.user)
         empleado_obj = request.user
+
+        # Redimir bono si aplica
+        monto_bono_usado = None
+        if bono_obj is not None:
+            from bonos.models import UsoBono
+            from decimal import Decimal as _D
+            monto_bono   = min(bono_obj.saldo, _D(str(venta.total)))
+            saldo_antes  = bono_obj.saldo
+            bono_obj.saldo -= monto_bono
+            if bono_obj.saldo == 0:
+                bono_obj.estado = 'redimido'
+            bono_obj.save(update_fields=['saldo', 'estado'])
+            UsoBono.objects.create(
+                bono=bono_obj, venta=venta, tienda_id=tienda_id,
+                monto_usado=monto_bono, saldo_antes=saldo_antes,
+                saldo_despues=bono_obj.saldo,
+            )
+            monto_bono_usado = float(monto_bono)
 
         for detalle in venta.detalles.all():
             inv = Inventario.objects.select_for_update().get(
@@ -152,6 +185,11 @@ class CrearVentaView(APIView):
                 for d in venta.detalles.all()
             ],
             "tier_feedback": tier_feedback,
+            "bono_usado": {
+                "codigo":        bono_obj.codigo,
+                "monto_usado":   monto_bono_usado,
+                "saldo_despues": float(bono_obj.saldo),
+            } if bono_obj else None,
         }, status=201)
 
 

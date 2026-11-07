@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'empresas',
     'configuracion',
     'documentos',
+    'bonos',
 ]
 
 MIDDLEWARE = [

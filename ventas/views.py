@@ -203,7 +203,7 @@ class VentaListView(generics.ListAPIView):
         user = self.request.user
         qs   = Venta.objects.select_related(
             "cliente", "empleado", "tienda", "sesion_caja"
-        ).prefetch_related("detalles")
+        ).prefetch_related("detalles", "pagos")
 
         qs = scope_qs(self.request, qs, campo_empresa="tienda__empresa")
 
@@ -245,10 +245,10 @@ class VentaDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         if es_superadmin(self.request):
-            return Venta.objects.prefetch_related("detalles__producto")
+            return Venta.objects.prefetch_related("detalles__producto", "pagos")
         return Venta.objects.filter(
             tienda__empresa=get_empresa(self.request)
-        ).prefetch_related("detalles__producto")
+        ).prefetch_related("detalles__producto", "pagos")
 
 
 # ── Anular venta ──────────────────────────────────────────

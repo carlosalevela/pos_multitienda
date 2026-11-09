@@ -4,12 +4,15 @@ from django.conf import settings
 
 class Venta(models.Model):
     METODOS_PAGO = [
-        ("efectivo",      "Efectivo"),
-        ("tarjeta",       "Tarjeta"),
-        ("transferencia", "Transferencia"),
-        ("mixto",         "Mixto"),
-        ("credito",       "Crédito"),
-        ("bono",          "Bono"),
+        ("efectivo",           "Efectivo"),
+        ("tarjeta",            "Tarjeta"),
+        ("transferencia",      "Transferencia"),
+        ("mixto",              "Mixto"),
+        ("credito",            "Crédito"),
+        ("bono",               "Bono"),
+        ("bono_efectivo",      "Bono + Efectivo"),
+        ("bono_tarjeta",       "Bono + Tarjeta"),
+        ("bono_transferencia", "Bono + Transferencia"),
     ]
     ESTADOS = [
         ("completada", "Completada"),
@@ -143,6 +146,7 @@ class PagoVenta(models.Model):
         ("efectivo",      "Efectivo"),
         ("tarjeta",       "Tarjeta"),
         ("transferencia", "Transferencia"),
+        ("bono",          "Bono"),
         ("nota_credito",  "Nota Crédito"),
         ("devolucion",    "Reconocimiento por devolución"),
     ]

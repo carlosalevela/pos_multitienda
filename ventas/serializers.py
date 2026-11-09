@@ -57,7 +57,7 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
 
 class VentaSerializer(serializers.ModelSerializer):
     detalles              = DetalleVentaSerializer(many=True)
-    pagos                 = PagoVentaSerializer(many=True, write_only=True, required=False, default=list)
+    pagos                 = PagoVentaSerializer(many=True, required=False, default=list)
     cliente_nombre        = serializers.SerializerMethodField()
     empleado_nombre       = serializers.SerializerMethodField()
     tienda_nombre         = serializers.CharField(source="tienda.nombre", read_only=True)

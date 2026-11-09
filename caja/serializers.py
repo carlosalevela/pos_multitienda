@@ -87,6 +87,16 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             qs = qs.filter(metodo_pago=metodo)
         return float(qs.aggregate(t=Sum("total"))["t"] or 0)
 
+    def _bono_pago_sum(self, obj, metodo_pago_venta, metodo_pago_pago):
+        """Suma la porción de PagoVenta para ventas bono+mixto."""
+        from ventas.models import PagoVenta
+        return float(PagoVenta.objects.filter(
+            venta__sesion_caja=obj,
+            venta__estado="completada",
+            venta__metodo_pago=metodo_pago_venta,
+            metodo=metodo_pago_pago,
+        ).aggregate(t=Sum("monto"))["t"] or 0)
+
     def _asum(self, obj, tipo, metodo=None):
         qs = obj.movimientos.filter(tipo=tipo)
         if metodo:
@@ -114,11 +124,25 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
 
     # ── ventas ───────────────────────────────────────────────
 
-    def get_ventas_efectivo(self, obj):       return self._vsum(obj, "efectivo")
-    def get_ventas_tarjeta(self, obj):        return self._vsum(obj, "tarjeta")
-    def get_ventas_transferencia(self, obj):  return self._vsum(obj, "transferencia")
+    def get_ventas_efectivo(self, obj):
+        return self._vsum(obj, "efectivo") + self._bono_pago_sum(obj, "bono_efectivo", "efectivo")
+
+    def get_ventas_tarjeta(self, obj):
+        return self._vsum(obj, "tarjeta") + self._bono_pago_sum(obj, "bono_tarjeta", "tarjeta")
+
+    def get_ventas_transferencia(self, obj):
+        return self._vsum(obj, "transferencia") + self._bono_pago_sum(obj, "bono_transferencia", "transferencia")
+
     def get_ventas_mixto(self, obj):          return self._vsum(obj, "mixto")
-    def get_ventas_bono(self, obj):           return self._vsum(obj, "bono")
+
+    def get_ventas_bono(self, obj):
+        base    = self._vsum(obj, "bono")
+        parcial = (
+            self._bono_pago_sum(obj, "bono_efectivo",      "bono") +
+            self._bono_pago_sum(obj, "bono_tarjeta",       "bono") +
+            self._bono_pago_sum(obj, "bono_transferencia", "bono")
+        )
+        return base + parcial
 
     def get_ventas_mixto_efectivo(self, obj):
         from ventas.models import PagoVenta, Venta
@@ -294,12 +318,36 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             qs = qs.filter(metodo_pago=metodo)
         return float(qs.aggregate(t=Sum("total"))["t"] or 0)
 
+    def _bono_pago_sum(self, obj, metodo_pago_venta, metodo_pago_pago):
+        from ventas.models import PagoVenta
+        return float(PagoVenta.objects.filter(
+            venta__sesion_caja=obj,
+            venta__estado="completada",
+            venta__metodo_pago=metodo_pago_venta,
+            metodo=metodo_pago_pago,
+        ).aggregate(t=Sum("monto"))["t"] or 0)
+
     def get_ventas_total(self, obj):         return self._vsum(obj)
-    def get_ventas_efectivo(self, obj):      return self._vsum(obj, "efectivo")
-    def get_ventas_tarjeta(self, obj):       return self._vsum(obj, "tarjeta")
-    def get_ventas_transferencia(self, obj): return self._vsum(obj, "transferencia")
+
+    def get_ventas_efectivo(self, obj):
+        return self._vsum(obj, "efectivo") + self._bono_pago_sum(obj, "bono_efectivo", "efectivo")
+
+    def get_ventas_tarjeta(self, obj):
+        return self._vsum(obj, "tarjeta") + self._bono_pago_sum(obj, "bono_tarjeta", "tarjeta")
+
+    def get_ventas_transferencia(self, obj):
+        return self._vsum(obj, "transferencia") + self._bono_pago_sum(obj, "bono_transferencia", "transferencia")
+
     def get_ventas_mixto(self, obj):         return self._vsum(obj, "mixto")
-    def get_ventas_bono(self, obj):          return self._vsum(obj, "bono")
+
+    def get_ventas_bono(self, obj):
+        base    = self._vsum(obj, "bono")
+        parcial = (
+            self._bono_pago_sum(obj, "bono_efectivo",      "bono") +
+            self._bono_pago_sum(obj, "bono_tarjeta",       "bono") +
+            self._bono_pago_sum(obj, "bono_transferencia", "bono")
+        )
+        return base + parcial
 
     def get_ventas_mixto_efectivo(self, obj):
         from ventas.models import PagoVenta, Venta

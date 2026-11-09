@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from django.db.models import Count, DecimalField, Q, Sum, Value
+from django.db.models import Count, DecimalField, OuterRef, Q, Subquery, Sum, Value
 from django.utils import timezone
 from django.db.models.functions import Coalesce
 from rest_framework import serializers
@@ -212,13 +212,25 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     @staticmethod
     def anotaciones():
         """QuerySet annotations requeridas por este serializer (solo totales bulk)."""
+        from contabilidad.models import Gasto
         _zero = Value(Decimal("0"), output_field=DecimalField())
+        # Subquery evita el JOIN cartesiano que multiplicaría gasto.monto
+        # por el número de ventas cuando ambas tablas se unen en un solo annotate.
+        gastos_subq = (
+            Gasto.objects.filter(sesion_caja=OuterRef("pk"))
+            .values("sesion_caja_id")
+            .annotate(t=Sum("monto"))
+            .values("t")[:1]
+        )
         return {
             "ventas_total_ann": Coalesce(
                 Sum("ventas__total", filter=Q(ventas__estado="completada")),
                 _zero,
             ),
-            "gastos_total_ann": Coalesce(Sum("gasto__monto"), _zero),
+            "gastos_total_ann": Coalesce(
+                Subquery(gastos_subq, output_field=DecimalField()),
+                _zero,
+            ),
             "num_transacciones_ann": Count(
                 "ventas",
                 filter=Q(ventas__estado="completada"),

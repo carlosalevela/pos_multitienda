@@ -215,3 +215,38 @@ class BonoDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return Bono.objects.prefetch_related('usos__tienda')
+
+
+class BonoCancelarView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def patch(self, request, codigo):
+        rol = getattr(request.user, 'perfil', None)
+        rol_nombre = getattr(rol, 'rol', '') if rol else ''
+        if rol_nombre not in ('admin', 'superadmin'):
+            return Response(
+                {'error': 'Solo admin o superadmin pueden cancelar bonos'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            bono = Bono.objects.select_for_update().get(codigo=codigo.upper())
+        except Bono.DoesNotExist:
+            return Response({'error': 'Bono no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+        if bono.estado in ('redimido', 'cancelado'):
+            return Response(
+                {'error': f'El bono ya está {bono.estado} y no se puede cancelar'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        bono.saldo  = Decimal('0')
+        bono.estado = 'cancelado'
+        bono.save(update_fields=['saldo', 'estado'])
+
+        return Response({
+            'codigo': bono.codigo,
+            'estado': bono.estado,
+            'saldo':  str(bono.saldo),
+        })

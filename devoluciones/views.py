@@ -12,7 +12,7 @@ from core.permissions import (
 )
 from productos.models import Inventario, MovimientoInventario, Producto
 from ventas.models import PagoVenta, Venta
-from .models import Devolucion, DetalleDevolucion
+from .models import Devolucion, DetalleDevolucion, DetalleReemplazo
 from .serializers import DevolucionSerializer
 
 
@@ -77,7 +77,7 @@ class _DevolucionMixin:
             self.request,
             Devolucion.objects.select_related(
                 "venta", "tienda", "empleado"
-            ).prefetch_related("detalles__producto"),
+            ).prefetch_related("detalles__producto", "reemplazos__producto"),
         )
         if (not es_superadmin(self.request) and
                 self.request.user.rol in ("supervisor", "cajero")):
@@ -268,52 +268,71 @@ class CambioProductoView(APIView):
                     status=status.HTTP_400_BAD_REQUEST)
             total_devuelto += cantidad * precio_unitario
 
-        try:
-            producto_reemplazo_id = int(
-                request.data.get("producto_reemplazo"))
-            cantidad_reemplazo = Decimal(
-                str(request.data.get("cantidad_reemplazo", 0)))
-        except (TypeError, ValueError):
+        # ── Productos de reemplazo (lista) ───────────────────
+        productos_reemplazo_data = request.data.get("productos_reemplazo", [])
+        # Compatibilidad con el campo legacy producto_reemplazo / cantidad_reemplazo
+        if not productos_reemplazo_data:
+            pr_id  = request.data.get("producto_reemplazo")
+            pr_qty = request.data.get("cantidad_reemplazo", 0)
+            if pr_id:
+                productos_reemplazo_data = [{"producto": pr_id, "cantidad": pr_qty}]
+
+        if not productos_reemplazo_data:
             return Response(
-                {"error": "Producto o cantidad de reemplazo inválidos."},
+                {"error": "Debes indicar al menos un producto de reemplazo."},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        if cantidad_reemplazo <= 0:
-            return Response(
-                {"error": "La cantidad del producto de reemplazo "
-                          "debe ser mayor a 0."},
-                status=status.HTTP_400_BAD_REQUEST)
+        reemplazos_procesados = []
+        total_reemplazo = Decimal("0")
 
-        try:
-            filtro_prod = {"pk": producto_reemplazo_id, "activo": True}
-            if not es_superadmin(request):
-                filtro_prod["empresa"] = get_empresa(request)
-            producto_reemplazo = Producto.objects.get(**filtro_prod)
-        except Producto.DoesNotExist:
-            return Response(
-                {"error": "Producto de reemplazo no encontrado."},
-                status=status.HTTP_404_NOT_FOUND)
+        for item_r in productos_reemplazo_data:
+            try:
+                prod_r_id  = int(item_r.get("producto", 0))
+                cant_r     = Decimal(str(item_r.get("cantidad", 0)))
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": "Datos de producto de reemplazo inválidos."},
+                    status=status.HTTP_400_BAD_REQUEST)
 
-        inventario_reemplazo = Inventario.objects.select_for_update().filter(
-            producto=producto_reemplazo,
-            tienda=venta.tienda,
-        ).first()
+            if cant_r <= 0:
+                return Response(
+                    {"error": "La cantidad del producto de reemplazo debe ser mayor a 0."},
+                    status=status.HTTP_400_BAD_REQUEST)
 
-        if not inventario_reemplazo:
-            return Response(
-                {"error": "El producto de reemplazo no tiene inventario "
-                          "en esta tienda."},
-                status=status.HTTP_400_BAD_REQUEST)
+            try:
+                filtro_prod = {"pk": prod_r_id, "activo": True}
+                if not es_superadmin(request):
+                    filtro_prod["empresa"] = get_empresa(request)
+                prod_r = Producto.objects.get(**filtro_prod)
+            except Producto.DoesNotExist:
+                return Response(
+                    {"error": f"Producto de reemplazo ID {prod_r_id} no encontrado."},
+                    status=status.HTTP_404_NOT_FOUND)
 
-        if inventario_reemplazo.stock_actual < cantidad_reemplazo:
-            return Response(
-                {"error": f"Stock insuficiente para "
-                          f"'{producto_reemplazo.nombre}'. "
-                          f"Disponible: {inventario_reemplazo.stock_actual}, "
-                          f"solicitado: {cantidad_reemplazo}."},
-                status=status.HTTP_400_BAD_REQUEST)
+            inv_r = Inventario.objects.select_for_update().filter(
+                producto=prod_r, tienda=venta.tienda).first()
 
-        total_reemplazo        = producto_reemplazo.precio_venta * cantidad_reemplazo
+            if not inv_r:
+                return Response(
+                    {"error": f"'{prod_r.nombre}' no tiene inventario en esta tienda."},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+            if inv_r.stock_actual < cant_r:
+                return Response(
+                    {"error": f"Stock insuficiente para '{prod_r.nombre}'. "
+                              f"Disponible: {inv_r.stock_actual}, solicitado: {cant_r}."},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+            subtotal_r = prod_r.precio_venta * cant_r
+            total_reemplazo += subtotal_r
+            reemplazos_procesados.append({
+                "producto": prod_r,
+                "inventario": inv_r,
+                "cantidad": cant_r,
+                "precio_unitario": prod_r.precio_venta,
+                "subtotal": subtotal_r,
+            })
+
         diferencia             = total_reemplazo - total_devuelto
         tipo_diferencia        = ("cobrar"   if diferencia > 0
                                   else "devolver" if diferencia < 0
@@ -336,37 +355,33 @@ class CambioProductoView(APIView):
         if tipo_diferencia == "cobrar":
             if not metodo_pago_diferencia:
                 return Response(
-                    {"error": "Debes indicar el método de pago "
-                              "de la diferencia."},
+                    {"error": "Debes indicar el método de pago de la diferencia."},
                     status=status.HTTP_400_BAD_REQUEST)
             if monto_recibido is None:
                 return Response(
-                    {"error": "Debes indicar el monto recibido "
-                              "para la diferencia."},
+                    {"error": "Debes indicar el monto recibido para la diferencia."},
                     status=status.HTTP_400_BAD_REQUEST)
             if monto_recibido < diferencia:
                 return Response(
-                    {"error": f"El monto recibido no cubre la "
-                              f"diferencia de {diferencia}."},
+                    {"error": f"El monto recibido no cubre la diferencia de {diferencia}."},
                     status=status.HTTP_400_BAD_REQUEST)
             if metodo_pago_diferencia == "efectivo":
                 cambio_entregado = monto_recibido - diferencia
 
+        # Usar primer reemplazo para el campo legacy en Devolucion
+        primer = reemplazos_procesados[0]
+
         serializer = DevolucionSerializer(
             data={
                 "venta":             venta.id,
-                "metodo_devolucion": request.data.get(
-                    "metodo_devolucion", "efectivo"),
+                "metodo_devolucion": request.data.get("metodo_devolucion", "efectivo"),
                 "observaciones":     request.data.get("observaciones", ""),
                 "detalles":          detalles_data,
             },
             context={"request": request},
         )
         if not serializer.is_valid():
-            return Response(
-                serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        empleado_obj = request.user
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         cuenta_destino = None
         cuenta_destino_id = request.data.get("cuenta_destino")
@@ -381,8 +396,8 @@ class CambioProductoView(APIView):
             empleado=request.user,
             tienda=venta.tienda,
             tipo="cambio",
-            producto_reemplazo=producto_reemplazo,
-            cantidad_reemplazo=cantidad_reemplazo,
+            producto_reemplazo=primer["producto"],
+            cantidad_reemplazo=primer["cantidad"],
             total_reemplazo=total_reemplazo,
             diferencia=abs(diferencia),
             tipo_diferencia=tipo_diferencia,
@@ -392,18 +407,30 @@ class CambioProductoView(APIView):
             cuenta_destino=cuenta_destino,
         )
 
-        _restaurar_stock(devolucion, empleado_obj, venta)
-        inventario_reemplazo.stock_actual -= cantidad_reemplazo
-        inventario_reemplazo.save(update_fields=["stock_actual"])
+        _restaurar_stock(devolucion, request.user, venta)
 
-        MovimientoInventario.objects.create(
-            producto=producto_reemplazo, tienda=venta.tienda,
-            empleado=empleado_obj, tipo="salida",
-            cantidad=cantidad_reemplazo, referencia_tipo="cambio",
-            referencia_id=devolucion.id,
-            observacion=f"Cambio DEV-{devolucion.id} | "
-                        f"{venta.numero_factura}",
-        )
+        # Descontar stock y registrar movimiento por cada reemplazo
+        DetalleReemplazo.objects.bulk_create([
+            DetalleReemplazo(
+                devolucion=devolucion,
+                producto=r["producto"],
+                cantidad=r["cantidad"],
+                precio_unitario=r["precio_unitario"],
+                subtotal=r["subtotal"],
+            )
+            for r in reemplazos_procesados
+        ])
+
+        for r in reemplazos_procesados:
+            r["inventario"].stock_actual -= r["cantidad"]
+            r["inventario"].save(update_fields=["stock_actual"])
+            MovimientoInventario.objects.create(
+                producto=r["producto"], tienda=venta.tienda,
+                empleado=request.user, tipo="salida",
+                cantidad=r["cantidad"], referencia_tipo="cambio",
+                referencia_id=devolucion.id,
+                observacion=f"Cambio DEV-{devolucion.id} | {venta.numero_factura}",
+            )
 
         return Response({
             "detail":                 "Cambio procesado correctamente.",
@@ -415,16 +442,18 @@ class CambioProductoView(APIView):
             "diferencia":             float(abs(diferencia)),
             "tipo_diferencia":        tipo_diferencia,
             "metodo_pago_diferencia": metodo_pago_diferencia or None,
-            "monto_recibido":         float(monto_recibido)
-                                      if monto_recibido is not None else None,
+            "monto_recibido":         float(monto_recibido) if monto_recibido is not None else None,
             "cambio_entregado":       float(cambio_entregado),
-            "producto_reemplazo": {
-                "id":              producto_reemplazo.id,
-                "nombre":          producto_reemplazo.nombre,
-                "cantidad":        float(cantidad_reemplazo),
-                "precio_unitario": float(producto_reemplazo.precio_venta),
-                "total":           float(total_reemplazo),
-            },
+            "productos_reemplazo": [
+                {
+                    "id":              r["producto"].id,
+                    "nombre":          r["producto"].nombre,
+                    "cantidad":        float(r["cantidad"]),
+                    "precio_unitario": float(r["precio_unitario"]),
+                    "subtotal":        float(r["subtotal"]),
+                }
+                for r in reemplazos_procesados
+            ],
         }, status=status.HTTP_201_CREATED)
 
 

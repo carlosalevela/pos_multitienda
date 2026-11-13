@@ -1,7 +1,7 @@
 from decimal import Decimal
 from rest_framework import serializers
 from core.permissions import es_superadmin, get_empresa
-from .models import Devolucion, DetalleDevolucion
+from .models import Devolucion, DetalleDevolucion, DetalleReemplazo
 
 
 class DetalleDevolucionSerializer(serializers.ModelSerializer):
@@ -37,8 +37,18 @@ class DetalleDevolucionSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class DetalleReemplazoSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source="producto.nombre", read_only=True)
+
+    class Meta:
+        model = DetalleReemplazo
+        fields = ["id", "producto", "producto_nombre", "cantidad", "precio_unitario", "subtotal"]
+        read_only_fields = ["id", "subtotal"]
+
+
 class DevolucionSerializer(serializers.ModelSerializer):
     detalles = DetalleDevolucionSerializer(many=True)
+    reemplazos = DetalleReemplazoSerializer(many=True, read_only=True)
     empleado_nombre = serializers.SerializerMethodField()
     tienda_nombre = serializers.CharField(source="tienda.nombre", read_only=True)
     venta_numero = serializers.CharField(source="venta.numero_factura", read_only=True)
@@ -70,7 +80,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
             "monto_recibido",
             "cambio_entregado",
             "estado", "observaciones",
-            "created_at", "detalles",
+            "created_at", "detalles", "reemplazos",
         ]
         read_only_fields = [
             "id", "empleado", "tienda",

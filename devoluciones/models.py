@@ -142,3 +142,25 @@ class DetalleDevolucion(models.Model):
 
     def __str__(self):
         return f"{self.devolucion} - {self.producto.nombre}"
+
+
+class DetalleReemplazo(models.Model):
+    devolucion = models.ForeignKey(
+        Devolucion,
+        on_delete=models.CASCADE,
+        related_name="reemplazos",
+    )
+    producto = models.ForeignKey(
+        "productos.Producto",
+        on_delete=models.PROTECT,
+    )
+    cantidad = models.DecimalField(max_digits=10, decimal_places=2)
+    precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    def save(self, *args, **kwargs):
+        self.subtotal = self.cantidad * self.precio_unitario
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.devolucion} - reemplazo {self.producto.nombre}"

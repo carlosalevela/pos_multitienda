@@ -304,8 +304,8 @@ class AppVersionView(APIView):
     permission_classes = [AllowAny]
 
     # Actualiza estos valores al publicar una nueva versión
-    LATEST_VERSION = "1.5.1"
-    DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.5.1/POS_Multitienda_Setup.exe"
+    LATEST_VERSION = "1.5.2"
+    DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.5.2/POS_Multitienda_Setup.exe"
 
     def get(self, request):
         client_version = request.query_params.get('v', 'desconocida')

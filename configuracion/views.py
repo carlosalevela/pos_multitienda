@@ -1,8 +1,12 @@
+import logging
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.db import models
 from django.db.models import Sum
+
+logger = logging.getLogger(__name__)
 
 from core.permissions import es_superadmin, get_empresa
 from tiendas.models import Tienda
@@ -300,12 +304,21 @@ class AppVersionView(APIView):
     permission_classes = [AllowAny]
 
     # Actualiza estos valores al publicar una nueva versión
-    LATEST_VERSION = "1.4.0"
-    DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.4.0/POS_Multitienda_Setup.exe"
+    LATEST_VERSION = "1.5.0"
+    DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.5.0/POS_Multitienda_Setup.exe"
 
     def get(self, request):
+        client_version = request.query_params.get('v', 'desconocida')
+        ip = request.META.get('HTTP_X_FORWARDED_FOR', request.META.get('REMOTE_ADDR', '?'))
+        needs_update = client_version != 'desconocida' and client_version != self.LATEST_VERSION
+
+        logger.info(
+            '[AppVersion] client_version=%s | latest=%s | needs_update=%s | ip=%s',
+            client_version, self.LATEST_VERSION, needs_update, ip
+        )
+
         return Response({
             "version":      self.LATEST_VERSION,
             "download_url": self.DOWNLOAD_URL,
-            "obligatoria":  False,  # True fuerza la actualización
+            "obligatoria":  False,
         })

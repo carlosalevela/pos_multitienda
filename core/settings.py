@@ -244,6 +244,12 @@ LOGGING = {
             'level': 'ERROR',
             'propagate': False,
         },
+        # Logs de versión de la app — siempre visibles en Railway
+        'configuracion.views': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
     },
 }
 

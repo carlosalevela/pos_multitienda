@@ -9,6 +9,41 @@ from core.permissions import es_superadmin, get_empresa
 from .models import SesionCaja
 
 
+# ── Serializer ultra-ligero para la lista paginada ─────────────
+class SesionCajaListaSerializer(serializers.ModelSerializer):
+    """Solo los campos que muestra la fila del historial. 1 query para toda la página."""
+
+    tienda_nombre   = serializers.CharField(source="tienda.nombre", read_only=True)
+    empleado_nombre = serializers.SerializerMethodField()
+    ventas_total    = serializers.DecimalField(
+        source="ventas_total_ann", max_digits=12, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model  = SesionCaja
+        fields = [
+            "id", "fecha_apertura", "fecha_cierre", "estado",
+            "tienda", "tienda_nombre",
+            "empleado", "empleado_nombre",
+            "diferencia", "ventas_total",
+        ]
+
+    def get_empleado_nombre(self, obj):
+        if obj.empleado:
+            return f"{obj.empleado.nombre} {obj.empleado.apellido}"
+        return None
+
+    @staticmethod
+    def anotaciones():
+        _zero = Value(Decimal("0"), output_field=DecimalField())
+        return {
+            "ventas_total_ann": Coalesce(
+                Sum("ventas__total", filter=Q(ventas__estado="completada")),
+                _zero,
+            ),
+        }
+
+
 # ── Serializer ligero para listas (evita N+1) ─────────────────
 class SesionCajaResumenSerializer(serializers.ModelSerializer):
     """Usado en SesionCajaListView. Totales vienen de anotaciones; desglose via SMF."""
@@ -434,7 +469,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
                 created_at__lte=cierre,
             )
             .select_related("venta", "cuenta_destino", "producto_reemplazo")
-            .prefetch_related("detalles__producto")
+            .prefetch_related("detalles__producto", "reemplazos__producto")
             .order_by("created_at")
         )
         result = []
@@ -442,6 +477,10 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             productos = [
                 {"producto": det.producto.nombre, "cantidad": float(det.cantidad)}
                 for det in d.detalles.all()
+            ]
+            reemplazos_lista = [
+                {"nombre": r.producto.nombre, "cantidad": float(r.cantidad), "subtotal": float(r.subtotal)}
+                for r in d.reemplazos.all()
             ]
             metodo = d.metodo_pago_diferencia if (d.tipo == "cambio" and d.metodo_pago_diferencia) else d.metodo_devolucion
             result.append({
@@ -454,6 +493,7 @@ class SesionCajaSerializer(serializers.ModelSerializer):
                 "metodo":              metodo,
                 "cuenta_nombre":       d.cuenta_destino.nombre if d.cuenta_destino else None,
                 "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
+                "reemplazos":          reemplazos_lista,
                 "productos_devueltos": productos,
             })
         return result

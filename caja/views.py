@@ -5,6 +5,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from rest_framework import generics
+from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -17,7 +18,7 @@ from ventas.models import PagoVenta, Venta
 from .models import SesionCaja
 from .serializers import (
     AbrirCajaSerializer, CerrarCajaSerializer,
-    SesionCajaResumenSerializer, SesionCajaSerializer,
+    SesionCajaListaSerializer, SesionCajaResumenSerializer, SesionCajaSerializer,
 )
 
 
@@ -272,16 +273,17 @@ class SesionActivaView(APIView):
         return Response(SesionCajaSerializer(sesion, context={"request": request}).data)
 
 
-# ── Historial (lista ligera sin N+1) ─────────────────────────
+# ── Historial (lista ultra-ligera paginada) ───────────────────
 class SesionCajaListView(generics.ListAPIView):
-    serializer_class   = SesionCajaResumenSerializer
+    serializer_class   = SesionCajaListaSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class   = LimitOffsetPagination
 
     def get_queryset(self):
         qs = (
             SesionCaja.objects
             .select_related("empleado", "tienda")
-            .annotate(**SesionCajaResumenSerializer.anotaciones())
+            .annotate(**SesionCajaListaSerializer.anotaciones())
             .order_by("-fecha_apertura")
         )
 
@@ -431,8 +433,12 @@ class ResumenCierreView(APIView):
             })
 
         detalle_devs = []
-        for d in base_d.select_related("venta", "cuenta_destino", "producto_reemplazo").prefetch_related("detalles__producto").order_by("created_at"):
+        for d in base_d.select_related("venta", "cuenta_destino", "producto_reemplazo").prefetch_related("detalles__producto", "reemplazos__producto").order_by("created_at"):
             metodo = d.metodo_pago_diferencia if (d.tipo == "cambio" and d.metodo_pago_diferencia) else d.metodo_devolucion
+            reemplazos_lista = [
+                {"nombre": r.producto.nombre, "cantidad": float(r.cantidad), "subtotal": float(r.subtotal)}
+                for r in d.reemplazos.all()
+            ]
             detalle_devs.append({
                 "id":                  d.id,
                 "venta_numero":        d.venta.numero_factura,
@@ -443,6 +449,7 @@ class ResumenCierreView(APIView):
                 "metodo":              metodo,
                 "cuenta_nombre":       d.cuenta_destino.nombre if d.cuenta_destino else None,
                 "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
+                "reemplazos":          reemplazos_lista,
             })
 
         # Ventas anuladas durante este turno

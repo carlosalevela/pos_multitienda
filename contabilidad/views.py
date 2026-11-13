@@ -1,7 +1,8 @@
+import zoneinfo
 from decimal import Decimal
 
 from django.db.models import Case, Count, DecimalField, F, Max, Min, Q, Sum, Value, When
-from django.db.models.functions import Coalesce, TruncDate, TruncMonth
+from django.db.models.functions import Coalesce, TruncDate, TruncHour, TruncMonth
 from django.http import HttpResponse
 from django.utils import timezone
 from openpyxl import Workbook
@@ -20,7 +21,7 @@ from core.permissions import (
 )
 from devoluciones.models import Devolucion
 from productos.models import MovimientoInventario
-from ventas.models import DetalleVenta, Venta
+from ventas.models import DetalleVenta, PagoVenta, Venta
 
 from .models import Gasto
 from .serializers import GastoSerializer
@@ -36,6 +37,10 @@ MESES = [
     "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
 ]
 
+
+# Zona horaria explícita para todos los TruncDate/TruncMonth.
+# No depende del contexto de la conexión PostgreSQL ni de timezone.activate().
+TZ = zoneinfo.ZoneInfo('America/Bogota')
 
 MAX_DIAS_RANGO = 366
 
@@ -216,8 +221,25 @@ class ResumenDiarioView(APIView):
         total_gastos       = gastos_qs.aggregate(t=Sum("monto"))["t"]         or Decimal("0")
         total_devoluciones = dev_qs.aggregate(t=Sum("total_devuelto"))["t"]   or Decimal("0")
 
-        por_metodo     = ventas_qs.values("metodo_pago").annotate(total=Sum("total"), cantidad=Count("id"))
+        por_metodo_raw = ventas_qs.values("metodo_pago").annotate(total=Sum("total"), cantidad=Count("id"))
         dev_por_metodo = dev_qs.values("metodo_devolucion").annotate(total=Sum("total_devuelto"), cantidad=Count("id"))
+
+        # Normaliza bono_efectivo → efectivo, bono_tarjeta → tarjeta, etc.
+        def _norm(mp):
+            if mp == "bono_efectivo":        return "efectivo"
+            if mp == "bono_tarjeta":         return "tarjeta"
+            if mp == "bono_transferencia":   return "transferencia"
+            if (mp or "").startswith("bono"): return "bono"
+            return mp or "efectivo"
+
+        _mmap: dict = {}
+        for v in por_metodo_raw:
+            m = _norm(v["metodo_pago"])
+            if m not in _mmap:
+                _mmap[m] = {"total": Decimal("0"), "cantidad": 0}
+            _mmap[m]["total"]    += Decimal(str(v["total"] or 0))
+            _mmap[m]["cantidad"] += v["cantidad"]
+        por_metodo = [{"metodo": m, **vals} for m, vals in _mmap.items()]
 
         gastos_por_categoria = []
         if request.user.rol != "cajero":
@@ -227,6 +249,53 @@ class ResumenDiarioView(APIView):
                 .annotate(total=Sum("monto"), cantidad=Count("id"))
                 .order_by("-total")
             ]
+
+        # ── Nuevos campos para dashboard ──────────────────────
+        ventas_por_hora = list(
+            ventas_qs.annotate(hora=TruncHour("created_at", tzinfo=TZ))
+            .values("hora")
+            .annotate(total=Sum("total"), cantidad=Count("id"))
+            .order_by("hora")
+        )
+
+        top_prods_dia = list(
+            DetalleVenta.objects
+            .filter(venta__in=ventas_qs)
+            .values("producto__nombre")
+            .annotate(ingresos=Sum("subtotal"), cantidad=Sum("cantidad"))
+            .order_by("-ingresos")[:5]
+        )
+
+        vendedores_dia = list(
+            ventas_qs
+            .values("empleado__nombre", "empleado__apellido")
+            .annotate(total=Sum("total"), num_ventas=Count("id"))
+            .order_by("-total")[:5]
+        )
+
+        # cuadre de efectivo — incluye bono_efectivo (porción ef) y mixto (porción ef)
+        ventas_ef_base = ventas_qs.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_ef  = PagoVenta.objects.filter(
+            venta__in=ventas_qs.filter(metodo_pago="bono_efectivo"),
+            metodo="efectivo",
+        ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        mixto_qs = ventas_qs.filter(metodo_pago="mixto")
+        ids_con  = PagoVenta.objects.filter(venta__in=mixto_qs).values("venta_id")
+        mx_ef    = PagoVenta.objects.filter(venta__in=mixto_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        mx_lg    = mixto_qs.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        ventas_ef = ventas_ef_base + bono_ef + mx_ef + mx_lg
+        dev_ef    = dev_qs.filter(metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
+
+        abonos_ef_qs = MovimientoCaja.objects.filter(
+            tipo__in=["abono_separado", "abono_credito"],
+            metodo_pago="efectivo",
+            created_at__date=fecha,
+        )
+        if not es_superadmin(request):
+            abonos_ef_qs = abonos_ef_qs.filter(sesion__tienda__empresa=get_empresa(request))
+        if tienda_id:
+            abonos_ef_qs = abonos_ef_qs.filter(sesion__tienda_id=tienda_id)
+        abonos_ef = abonos_ef_qs.aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
         return Response({
             "fecha":              str(fecha),
@@ -238,7 +307,7 @@ class ResumenDiarioView(APIView):
             "total_neto":         float(total_ventas - total_devoluciones),
             "utilidad_bruta":     float(total_ventas - total_devoluciones - total_gastos),
             "ventas_por_metodo_pago": [
-                {"metodo": v["metodo_pago"], "total": float(v["total"]), "cantidad": v["cantidad"]}
+                {"metodo": v["metodo"], "total": float(v["total"]), "cantidad": v["cantidad"]}
                 for v in por_metodo
             ],
             "devoluciones_por_metodo": [
@@ -246,6 +315,33 @@ class ResumenDiarioView(APIView):
                 for d in dev_por_metodo
             ],
             "gastos_por_categoria": gastos_por_categoria,
+            "ventas_por_hora": [
+                {"hora": v["hora"].hour, "total": float(v["total"]), "cantidad": v["cantidad"]}
+                for v in ventas_por_hora
+            ],
+            "top_productos_dia": [
+                {
+                    "nombre":   p["producto__nombre"] or "Sin nombre",
+                    "ingresos": float(p["ingresos"]),
+                    "cantidad": int(p["cantidad"]),
+                }
+                for p in top_prods_dia
+            ],
+            "vendedores_dia": [
+                {
+                    "nombre":    (f"{v['empleado__nombre'] or ''} {v['empleado__apellido'] or ''}").strip() or "—",
+                    "total":     float(v["total"]),
+                    "num_ventas": v["num_ventas"],
+                }
+                for v in vendedores_dia
+            ],
+            "cuadre_efectivo": {
+                "ventas_ef":        float(ventas_ef),
+                "abonos_ef":        float(abonos_ef),
+                "gastos_ef":        float(total_gastos),
+                "dev_ef":           float(dev_ef),
+                "efectivo_esperado": float(ventas_ef + abonos_ef - total_gastos - dev_ef),
+            },
             "advertencia_cajas_abiertas": _cajas_abiertas(request, tienda_id, str(fecha)),
         })
 
@@ -279,20 +375,73 @@ class ResumenMensualView(APIView):
         devoluciones_mes = dev_qs.aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
 
         por_dia = (
-            ventas_qs.annotate(dia=TruncDate("created_at"))
+            ventas_qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
             .values("dia").annotate(total=Sum("total"), cantidad=Count("id")).order_by("dia")
         )
         gastos_por_categoria = (
             gastos_qs.values("categoria").annotate(total=Sum("monto")).order_by("-total")
         )
         gastos_por_dia = (
-            gastos_qs.annotate(dia=TruncDate("created_at"))
+            gastos_qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
             .values("dia").annotate(total=Sum("monto")).order_by("dia")
         )
         devoluciones_por_dia = (
-            dev_qs.annotate(dia=TruncDate("created_at"))
+            dev_qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
             .values("dia").annotate(total=Sum("total_devuelto"), cantidad=Count("id")).order_by("dia")
         )
+
+        # Métodos de pago del mes (normalizados)
+        def _norm(mp):
+            if mp == "bono_efectivo":         return "efectivo"
+            if mp == "bono_tarjeta":          return "tarjeta"
+            if mp == "bono_transferencia":    return "transferencia"
+            if (mp or "").startswith("bono"): return "bono"
+            return mp or "efectivo"
+
+        por_metodo_raw = ventas_qs.values("metodo_pago").annotate(
+            total=Sum("total"), cantidad=Count("id")
+        )
+        _mmap: dict = {}
+        for v in por_metodo_raw:
+            m = _norm(v["metodo_pago"])
+            if m not in _mmap:
+                _mmap[m] = {"total": Decimal("0"), "cantidad": 0}
+            _mmap[m]["total"]    += Decimal(str(v["total"] or 0))
+            _mmap[m]["cantidad"] += v["cantidad"]
+        metodos_pago_mes = [
+            {"metodo": m, "total": float(vals["total"]), "cantidad": vals["cantidad"]}
+            for m, vals in _mmap.items()
+        ]
+
+        # Top 5 productos del mes
+        top_prods_mes = (
+            DetalleVenta.objects.filter(venta__in=ventas_qs)
+            .values("producto__nombre")
+            .annotate(ingresos=Sum("subtotal"), cantidad=Sum("cantidad"))
+            .order_by("-ingresos")[:5]
+        )
+
+        # Vendedores del mes
+        vendedores_mes_qs = (
+            ventas_qs.values("empleado__nombre", "empleado__apellido")
+            .annotate(total=Sum("total"), num_ventas=Count("id"))
+            .order_by("-total")[:5]
+        )
+
+        # Mes anterior para cálculo de deltas en el cliente
+        anio_ant = anio if mes > 1 else anio - 1
+        mes_ant  = mes - 1 if mes > 1 else 12
+        v_ant = Venta.objects.filter(
+            estado="completada", created_at__year=anio_ant, created_at__month=mes_ant
+        )
+        g_ant = Gasto.objects.filter(created_at__year=anio_ant, created_at__month=mes_ant)
+        d_ant = Devolucion.objects.filter(
+            estado="procesada", created_at__year=anio_ant, created_at__month=mes_ant
+        )
+        v_ant, g_ant, d_ant = scope_qs(request, v_ant, g_ant, d_ant, tienda_id=tienda_id)
+        total_ant  = v_ant.aggregate(t=Sum("total"))["t"]          or Decimal("0")
+        gastos_ant = g_ant.aggregate(t=Sum("monto"))["t"]          or Decimal("0")
+        dev_ant    = d_ant.aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
 
         return Response({
             "anio":               int(anio),
@@ -318,6 +467,31 @@ class ResumenMensualView(APIView):
                 {"dia": str(d["dia"]), "total": float(d["total"]), "cantidad": d["cantidad"]}
                 for d in devoluciones_por_dia
             ],
+            "metodos_pago_mes": metodos_pago_mes,
+            "top_productos_mes": [
+                {
+                    "nombre":   p["producto__nombre"] or "Sin nombre",
+                    "ingresos": float(p["ingresos"]),
+                    "cantidad": int(p["cantidad"]),
+                }
+                for p in top_prods_mes
+            ],
+            "vendedores_mes": [
+                {
+                    "nombre":    (
+                        f"{v['empleado__nombre'] or ''} {v['empleado__apellido'] or ''}"
+                    ).strip() or "—",
+                    "total":     float(v["total"]),
+                    "num_ventas": v["num_ventas"],
+                }
+                for v in vendedores_mes_qs
+            ],
+            "mes_anterior": {
+                "total_ventas":       float(total_ant),
+                "total_gastos":       float(gastos_ant),
+                "total_devoluciones": float(dev_ant),
+                "utilidad_bruta":     float(total_ant - dev_ant - gastos_ant),
+            },
         })
 
 
@@ -381,17 +555,17 @@ class ResumenAnualView(APIView):
 
         por_mes_ventas = {
             v["mes"].month: v
-            for v in ventas_qs.annotate(mes=TruncMonth("created_at"))
+            for v in ventas_qs.annotate(mes=TruncMonth("created_at", tzinfo=TZ))
             .values("mes").annotate(total=Sum("total"), cantidad=Count("id"))
         }
         por_mes_gastos = {
             g["mes"].month: float(g["total"])
-            for g in gastos_qs.annotate(mes=TruncMonth("created_at"))
+            for g in gastos_qs.annotate(mes=TruncMonth("created_at", tzinfo=TZ))
             .values("mes").annotate(total=Sum("monto"))
         }
         por_mes_devoluciones = {
             d["mes"].month: float(d["total"])
-            for d in dev_qs.annotate(mes=TruncMonth("created_at"))
+            for d in dev_qs.annotate(mes=TruncMonth("created_at", tzinfo=TZ))
             .values("mes").annotate(total=Sum("total_devuelto"))
         }
 
@@ -419,6 +593,361 @@ class ResumenAnualView(APIView):
             "total_neto":         float(total_anio - devoluciones_anio),
             "utilidad_bruta":     float(total_anio - devoluciones_anio - gastos_anio),
             "meses":              meses,
+        })
+
+
+# ── Resumen por rango (semana / mes / rango personalizado) ────
+class ResumenRangoView(APIView):
+    """
+    Endpoint unificado para periodos arbitrarios.
+    Params: fecha_ini, fecha_fin (YYYY-MM-DD), tienda_id (opcional).
+    Si se omiten las fechas devuelve la semana actual (Lun–Dom).
+    Incluye: totales, comparativo vs período anterior, ventas por día,
+    métodos de pago, gastos, abonos, devoluciones, top productos y top clientes.
+    """
+    permission_classes = [EsAdminOSupervisor]
+
+    def get(self, request):
+        from datetime import date as _date, timedelta
+
+        tienda_id = request.query_params.get("tienda_id")
+
+        # ── Rango (default: semana actual Lun–Dom) ─────────────
+        today = timezone.localdate()
+        default_ini = today - timedelta(days=today.weekday())
+        default_fin = default_ini + timedelta(days=6)
+
+        fecha_ini_str = request.query_params.get("fecha_ini") or str(default_ini)
+        fecha_fin_str = request.query_params.get("fecha_fin") or str(default_fin)
+
+        err = _validar_rango(fecha_ini_str, fecha_fin_str)
+        if err:
+            return err
+
+        fecha_ini = _date.fromisoformat(fecha_ini_str)
+        fecha_fin = _date.fromisoformat(fecha_fin_str)
+        num_dias  = (fecha_fin - fecha_ini).days + 1
+
+        # ── QuerySets base ─────────────────────────────────────
+        ventas_qs = Venta.objects.filter(
+            estado="completada",
+            created_at__date__gte=fecha_ini,
+            created_at__date__lte=fecha_fin,
+        )
+        gastos_qs = Gasto.objects.filter(
+            created_at__date__gte=fecha_ini,
+            created_at__date__lte=fecha_fin,
+        )
+        dev_qs = Devolucion.objects.filter(
+            estado="procesada",
+            created_at__date__gte=fecha_ini,
+            created_at__date__lte=fecha_fin,
+        )
+        ventas_qs, gastos_qs, dev_qs = scope_qs(
+            request, ventas_qs, gastos_qs, dev_qs, tienda_id=tienda_id
+        )
+
+        # ── Totales ────────────────────────────────────────────
+        total_ventas       = ventas_qs.aggregate(t=Sum("total"))["t"]       or Decimal("0")
+        total_gastos       = gastos_qs.aggregate(t=Sum("monto"))["t"]       or Decimal("0")
+        total_devoluciones = dev_qs.aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
+        num_ventas         = ventas_qs.count()
+        ticket_promedio    = float(total_ventas / num_ventas) if num_ventas > 0 else 0.0
+
+        # ── Comparativo período anterior (mismo largo) ─────────
+        prev_fin = fecha_ini - timedelta(days=1)
+        prev_ini = prev_fin  - timedelta(days=num_dias - 1)
+
+        pv_qs = Venta.objects.filter(
+            estado="completada",
+            created_at__date__gte=prev_ini,
+            created_at__date__lte=prev_fin,
+        )
+        pg_qs = Gasto.objects.filter(
+            created_at__date__gte=prev_ini,
+            created_at__date__lte=prev_fin,
+        )
+        pd_qs = Devolucion.objects.filter(
+            estado="procesada",
+            created_at__date__gte=prev_ini,
+            created_at__date__lte=prev_fin,
+        )
+        pv_qs, pg_qs, pd_qs = scope_qs(
+            request, pv_qs, pg_qs, pd_qs, tienda_id=tienda_id
+        )
+
+        prev_ventas    = float(pv_qs.aggregate(t=Sum("total"))["t"]       or 0)
+        prev_gastos    = float(pg_qs.aggregate(t=Sum("monto"))["t"]       or 0)
+        prev_devs      = float(pd_qs.aggregate(t=Sum("total_devuelto"))["t"] or 0)
+        prev_num_ventas = pv_qs.count()
+        prev_ticket    = prev_ventas / prev_num_ventas if prev_num_ventas > 0 else 0.0
+        prev_utilidad  = prev_ventas - prev_devs - prev_gastos
+
+        def _pct(actual, anterior):
+            if anterior == 0:
+                return None
+            return round((float(actual) - anterior) / anterior * 100, 1)
+
+        # ── Ventas por día ─────────────────────────────────────
+        ventas_por_dia = list(
+            ventas_qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
+            .values("dia")
+            .annotate(total=Sum("total"), cantidad=Count("id"))
+            .order_by("dia")
+        )
+        gastos_por_dia = list(
+            gastos_qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
+            .values("dia")
+            .annotate(total=Sum("monto"))
+            .order_by("dia")
+        )
+
+        # ── Métodos de pago ────────────────────────────────────
+        def _norm(mp):
+            if mp == "bono_efectivo":         return "efectivo"
+            if mp == "bono_tarjeta":          return "tarjeta"
+            if mp == "bono_transferencia":    return "transferencia"
+            if (mp or "").startswith("bono"): return "bono"
+            return mp or "efectivo"
+
+        _pm_raw = ventas_qs.values("metodo_pago").annotate(total=Sum("total"), cantidad=Count("id"))
+        _mmap: dict = {}
+        for v in _pm_raw:
+            m = _norm(v["metodo_pago"])
+            if m not in _mmap:
+                _mmap[m] = {"total": Decimal("0"), "cantidad": 0}
+            _mmap[m]["total"]    += Decimal(str(v["total"] or 0))
+            _mmap[m]["cantidad"] += v["cantidad"]
+        por_metodo = [
+            {"metodo": m, "total": float(vals["total"]), "cantidad": vals["cantidad"]}
+            for m, vals in sorted(_mmap.items(), key=lambda x: -x[1]["total"])
+        ]
+
+        # ── Gastos por categoría ───────────────────────────────
+        gastos_por_cat = list(
+            gastos_qs.values("categoria")
+            .annotate(total=Sum("monto"), cantidad=Count("id"))
+            .order_by("-total")
+        )
+
+        # ── Devoluciones desglosadas ───────────────────────────
+        def _dev_sum(qs, **filters):
+            return float(qs.filter(**filters).aggregate(t=Sum("total_devuelto"))["t"] or 0)
+
+        def _dif_sum(qs, **filters):
+            return float(qs.filter(**filters).aggregate(t=Sum("diferencia"))["t"] or 0)
+
+        # ── Abonos desde MovimientoCaja ────────────────────────
+        abonos_qs = MovimientoCaja.objects.filter(
+            tipo__in=["abono_separado", "abono_credito"],
+            created_at__date__gte=fecha_ini,
+            created_at__date__lte=fecha_fin,
+        )
+        if not es_superadmin(request):
+            abonos_qs = abonos_qs.filter(sesion__tienda__empresa=get_empresa(request))
+        if tienda_id:
+            abonos_qs = abonos_qs.filter(sesion__tienda_id=tienda_id)
+
+        def _ab(metodo=None, tipo=None):
+            qs = abonos_qs
+            if metodo: qs = qs.filter(metodo_pago=metodo)
+            if tipo:   qs = qs.filter(tipo=tipo)
+            return float(qs.aggregate(t=Sum("monto"))["t"] or 0)
+
+        # ── Top 5 productos ────────────────────────────────────
+        top_prod = list(
+            DetalleVenta.objects
+            .filter(venta__in=ventas_qs)
+            .values("producto__nombre")
+            .annotate(cantidad=Sum("cantidad"), ingresos=Sum("subtotal"))
+            .order_by("-ingresos")[:5]
+        )
+
+        # ── Top 5 clientes ─────────────────────────────────────
+        top_cli = list(
+            ventas_qs
+            .exclude(cliente__isnull=True)
+            .values("cliente__id", "cliente__nombre", "cliente__apellido")
+            .annotate(total=Sum("total"), num_compras=Count("id"))
+            .order_by("-total")[:5]
+        )
+
+        utilidad_bruta = float(total_ventas - total_devoluciones - total_gastos)
+
+        # ── Comparativo por tienda ─────────────────────────────
+        tiendas_raw = list(
+            ventas_qs
+            .values("tienda_id", "tienda__nombre")
+            .annotate(
+                v_total=Sum("total"),
+                v_num=Count("id"),
+            )
+            .order_by("-v_total")
+        )
+        # Gastos por tienda (solo los que tienen tienda asignada)
+        gastos_tienda = {
+            g["tienda_id"]: float(g["t"] or 0)
+            for g in gastos_qs.values("tienda_id").annotate(t=Sum("monto"))
+        }
+        # Devoluciones por tienda
+        dev_tienda = {
+            d["venta__tienda_id"]: float(d["t"] or 0)
+            for d in dev_qs.values("venta__tienda_id").annotate(t=Sum("total_devuelto"))
+        }
+        comparativo_tiendas = []
+        for t in tiendas_raw:
+            tid     = t["tienda_id"]
+            vtotal  = float(t["v_total"] or 0)
+            vnum    = t["v_num"]
+            ticket  = vtotal / vnum if vnum > 0 else 0
+            gtotal  = gastos_tienda.get(tid, 0)
+            dtotal  = dev_tienda.get(tid, 0)
+            utilidad = vtotal - dtotal - gtotal
+            margen   = round(utilidad / vtotal * 100, 1) if vtotal > 0 else 0.0
+            comparativo_tiendas.append({
+                "tienda_id":    tid,
+                "nombre":       t["tienda__nombre"],
+                "ventas":       vtotal,
+                "num_ventas":   vnum,
+                "ticket":       round(ticket, 2),
+                "gastos":       gtotal,
+                "devoluciones": dtotal,
+                "utilidad":     round(utilidad, 2),
+                "margen":       margen,
+            })
+
+        # ── Cuadre de efectivo ─────────────────────────────────
+        ventas_ef_base = ventas_qs.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_ef  = PagoVenta.objects.filter(
+            venta__in=ventas_qs.filter(metodo_pago="bono_efectivo"),
+            metodo="efectivo",
+        ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        mixto_qs_r = ventas_qs.filter(metodo_pago="mixto")
+        ids_con_r  = PagoVenta.objects.filter(venta__in=mixto_qs_r).values("venta_id")
+        mx_ef_r    = PagoVenta.objects.filter(venta__in=mixto_qs_r, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        mx_lg_r    = mixto_qs_r.exclude(id__in=ids_con_r).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        ventas_ef   = float(ventas_ef_base + bono_ef + mx_ef_r + mx_lg_r)
+        gastos_ef   = float(gastos_qs.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or 0)
+        abonos_ef   = float(abonos_qs.filter(metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or 0)
+        dev_ef      = float(dev_qs.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or 0)
+        efectivo_esp = ventas_ef + abonos_ef - gastos_ef - dev_ef
+
+        # ── Cierres en el período ──────────────────────────────
+        cierres_qs = SesionCaja.objects.filter(
+            fecha_cierre__date__gte=fecha_ini,
+            fecha_cierre__date__lte=fecha_fin,
+            estado="cerrada",
+        ).select_related("empleado", "tienda").order_by("fecha_cierre")
+        if not es_superadmin(request):
+            empresa = get_empresa(request)
+            if empresa:
+                cierres_qs = cierres_qs.filter(tienda__empresa=empresa)
+        if tienda_id:
+            cierres_qs = cierres_qs.filter(tienda_id=tienda_id)
+
+        cierres_periodo = []
+        for c in cierres_qs[:20]:
+            emp = c.empleado
+            nombre_emp = f"{emp.nombre} {emp.apellido[0]}." if emp and emp.apellido else (emp.nombre if emp else "—")
+            cierres_periodo.append({
+                "id":           c.id,
+                "fecha_cierre": str(c.fecha_cierre.date()) if c.fecha_cierre else None,
+                "tienda":       c.tienda.nombre if c.tienda else "—",
+                "empleado":     nombre_emp,
+                "diferencia":   float(c.diferencia or 0),
+            })
+
+        return Response({
+            "fecha_ini": str(fecha_ini),
+            "fecha_fin": str(fecha_fin),
+            "num_dias":  num_dias,
+            # ── Totales ────────────────────────────────────────
+            "total_ventas":       float(total_ventas),
+            "num_ventas":         num_ventas,
+            "ticket_promedio":    ticket_promedio,
+            "total_gastos":       float(total_gastos),
+            "total_devoluciones": float(total_devoluciones),
+            "num_devoluciones":   dev_qs.count(),
+            "total_neto":         float(total_ventas - total_devoluciones),
+            "utilidad_bruta":     utilidad_bruta,
+            # ── Comparativo ────────────────────────────────────
+            "comparativo": {
+                "fecha_ini":        str(prev_ini),
+                "fecha_fin":        str(prev_fin),
+                "total_ventas":     prev_ventas,
+                "num_ventas":       prev_num_ventas,
+                "ticket_promedio":  prev_ticket,
+                "total_gastos":     prev_gastos,
+                "total_devoluciones": prev_devs,
+                "utilidad_bruta":   prev_utilidad,
+                "pct_ventas":       _pct(total_ventas,       prev_ventas),
+                "pct_gastos":       _pct(total_gastos,       prev_gastos),
+                "pct_devoluciones": _pct(total_devoluciones, prev_devs),
+                "pct_utilidad":     _pct(utilidad_bruta,     prev_utilidad),
+                "pct_ticket":       _pct(ticket_promedio,    prev_ticket),
+            },
+            # ── Por día ────────────────────────────────────────
+            "ventas_por_dia": [
+                {"dia": str(v["dia"]), "total": float(v["total"]), "cantidad": v["cantidad"]}
+                for v in ventas_por_dia
+            ],
+            "gastos_por_dia": [
+                {"dia": str(g["dia"]), "total": float(g["total"])}
+                for g in gastos_por_dia
+            ],
+            # ── Desgloses ──────────────────────────────────────
+            "ventas_por_metodo": por_metodo,
+            "gastos_por_categoria": [
+                {"categoria": g["categoria"], "total": float(g["total"]), "cantidad": g["cantidad"]}
+                for g in gastos_por_cat
+            ],
+            "devoluciones": {
+                "efectivo":                _dev_sum(dev_qs, tipo="devolucion", metodo_devolucion="efectivo"),
+                "tarjeta":                 _dev_sum(dev_qs, tipo="devolucion", metodo_devolucion="tarjeta"),
+                "transferencia":           _dev_sum(dev_qs, tipo="devolucion", metodo_devolucion="transferencia"),
+                "cambios_cobrar":          _dif_sum(dev_qs, tipo="cambio", tipo_diferencia="cobrar"),
+                "cambios_devolver":        _dif_sum(dev_qs, tipo="cambio", tipo_diferencia="devolver"),
+                "num_devoluciones_directas": dev_qs.filter(tipo="devolucion").count(),
+                "num_cambios":             dev_qs.filter(tipo="cambio").count(),
+            },
+            "abonos": {
+                "efectivo":      _ab("efectivo"),
+                "tarjeta":       _ab("tarjeta"),
+                "transferencia": _ab("transferencia"),
+                "separados":     _ab(tipo="abono_separado"),
+                "creditos":      _ab(tipo="abono_credito"),
+                "total":         _ab(),
+                "num_abonos":    abonos_qs.count(),
+            },
+            # ── Rankings ───────────────────────────────────────
+            "top_productos": [
+                {
+                    "nombre":   t["producto__nombre"],
+                    "cantidad": float(t["cantidad"]),
+                    "ingresos": float(t["ingresos"]),
+                }
+                for t in top_prod
+            ],
+            "top_clientes": [
+                {
+                    "cliente_id":  t["cliente__id"],
+                    "nombre":      f"{t['cliente__nombre']} {t.get('cliente__apellido') or ''}".strip(),
+                    "total":       float(t["total"]),
+                    "num_compras": t["num_compras"],
+                }
+                for t in top_cli
+            ],
+            "advertencia_cajas_abiertas": _cajas_abiertas(request, tienda_id, str(fecha_fin)),
+            # ── Secciones adicionales ──────────────────────────
+            "comparativo_tiendas": comparativo_tiendas,
+            "cuadre_efectivo": {
+                "ventas_efectivo": ventas_ef,
+                "abonos_efectivo": abonos_ef,
+                "gastos_efectivo": gastos_ef,
+                "devoluciones_efectivo": dev_ef,
+                "efectivo_esperado": efectivo_esp,
+            },
+            "cierres_periodo": cierres_periodo,
         })
 
 
@@ -451,7 +980,7 @@ class GastosResumenRangoView(APIView):
             .order_by("-total")
         )
         por_dia = (
-            qs.annotate(dia=TruncDate("created_at"))
+            qs.annotate(dia=TruncDate("created_at", tzinfo=TZ))
             .values("dia").annotate(total=Sum("monto"), cantidad=Count("id")).order_by("dia")
         )
 
@@ -835,7 +1364,7 @@ class VentasPorEmpleadoView(APIView):
         daily_map: dict = {}
         for row in (
             ventas_qs
-            .values("empleado_id", dia=TruncDate("created_at"))
+            .values("empleado_id", dia=TruncDate("created_at", tzinfo=TZ))
             .annotate(total_dia=Sum("total"))
             .order_by("empleado_id", "dia")
         ):

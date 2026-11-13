@@ -2,7 +2,7 @@ from django.urls import path
 from .views import (
     GastoListCreateView, GastoDetailView,
     ResumenDiarioView, ResumenMensualView,
-    ResumenAnualView, GastosResumenRangoView,
+    ResumenAnualView, ResumenRangoView, GastosResumenRangoView,
     ProductosMasVendidosView, EstadoResultadosView,
     ComparativoTiendasView, VentasPorEmpleadoView,
     PuntoEquilibrioView, FlujoCajaView,
@@ -17,6 +17,7 @@ urlpatterns = [
     path("reportes/diario/",              ResumenDiarioView.as_view(),        name="reporte_diario"),
     path("reportes/mensual/",             ResumenMensualView.as_view(),       name="reporte_mensual"),
     path("reportes/anual/",               ResumenAnualView.as_view(),         name="resumen_anual"),
+    path("reportes/rango/",               ResumenRangoView.as_view(),         name="resumen_rango"),
     path("reportes/top-productos/",       ProductosMasVendidosView.as_view(), name="top_productos"),
     path("reportes/estado-resultados/",   EstadoResultadosView.as_view(),     name="estado_resultados"),
     path("reportes/comparativo-tiendas/", ComparativoTiendasView.as_view(),   name="comparativo_tiendas"),

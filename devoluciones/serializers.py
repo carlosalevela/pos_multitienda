@@ -79,7 +79,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
             "cuenta_destino_nombre",
             "monto_recibido",
             "cambio_entregado",
-            "estado", "observaciones",
+            "estado", "observaciones", "motivo_cambio",
             "created_at", "detalles", "reemplazos",
         ]
         read_only_fields = [

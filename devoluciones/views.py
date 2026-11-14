@@ -50,7 +50,49 @@ def _restaurar_stock(devolucion: Devolucion, empleado, venta) -> None:
         )
 
 
+def _restaurar_stock_cambio(devolucion: Devolucion, empleado, venta) -> None:
+    """Cambio: el producto recibido del cliente vuelve al inventario o a averías
+    según motivo_cambio ('gusto' → stock_actual; 'averia'/'producto_danado' → stock_averias).
+    """
+    es_averia = devolucion.motivo_cambio in ("averia", "producto_danado")
+    for detalle in devolucion.detalles.select_related("producto"):
+        Inventario.objects.get_or_create(
+            producto=detalle.producto,
+            tienda=devolucion.tienda,
+            defaults={
+                "stock_actual":  Decimal("0"),
+                "stock_averias": Decimal("0"),
+                "stock_minimo":  Decimal("0"),
+                "stock_maximo":  Decimal("0"),
+            },
+        )
+        inv = Inventario.objects.select_for_update().get(
+            producto=detalle.producto,
+            tienda=devolucion.tienda,
+        )
+        if es_averia:
+            inv.stock_averias += detalle.cantidad
+            inv.save(update_fields=["stock_averias"])
+            tipo_mov = "dano"
+            obs = (f"Cambio DEV-{devolucion.id} | "
+                   f"{venta.numero_factura} → avería")
+        else:
+            inv.stock_actual += detalle.cantidad
+            inv.save(update_fields=["stock_actual"])
+            tipo_mov = "entrada"
+            obs = (f"Cambio DEV-{devolucion.id} | "
+                   f"{venta.numero_factura} → devuelto a inventario")
+        MovimientoInventario.objects.create(
+            producto=detalle.producto, tienda=devolucion.tienda,
+            empleado=empleado, tipo=tipo_mov,
+            cantidad=detalle.cantidad, referencia_tipo="cambio",
+            referencia_id=devolucion.id,
+            observacion=obs,
+        )
+
+
 def _revertir_stock(devolucion: Devolucion, empleado) -> None:
+    """Cancela una DEVOLUCIÓN: quita el producto de averías."""
     for detalle in devolucion.detalles.select_related("producto"):
         inv = Inventario.objects.select_for_update().filter(
             producto=detalle.producto,
@@ -67,6 +109,71 @@ def _revertir_stock(devolucion: Devolucion, empleado) -> None:
             referencia_tipo="cancelacion_devolucion",
             referencia_id=devolucion.id,
             observacion=f"Cancelación DEV-{devolucion.id} | avería revertida",
+        )
+
+
+def _revertir_stock_cambio(devolucion: Devolucion, empleado) -> None:
+    """Cancela un CAMBIO:
+    - Quita el producto recibido del cliente de donde fue almacenado
+      (stock_actual si era 'gusto'; stock_averias si era 'averia'/'producto_danado').
+    - Devuelve a stock_actual los productos entregados al cliente.
+    """
+    es_averia = devolucion.motivo_cambio in ("averia", "producto_danado")
+    # 1) Revertir lo que el cliente trajo
+    for detalle in devolucion.detalles.select_related("producto"):
+        inv = Inventario.objects.select_for_update().filter(
+            producto=detalle.producto,
+            tienda=devolucion.tienda,
+        ).first()
+        if inv:
+            if es_averia:
+                inv.stock_averias = max(
+                    Decimal("0"), inv.stock_averias - detalle.cantidad)
+                inv.save(update_fields=["stock_averias"])
+                obs = (f"Cancelación DEV-{devolucion.id} | "
+                       f"producto revertido de averías")
+            else:
+                inv.stock_actual = max(
+                    Decimal("0"), inv.stock_actual - detalle.cantidad)
+                inv.save(update_fields=["stock_actual"])
+                obs = (f"Cancelación DEV-{devolucion.id} | "
+                       f"producto revertido de inventario")
+        else:
+            obs = f"Cancelación DEV-{devolucion.id} | sin inventario"
+        MovimientoInventario.objects.create(
+            producto=detalle.producto, tienda=devolucion.tienda,
+            empleado=empleado, tipo="ajuste",
+            cantidad=detalle.cantidad,
+            referencia_tipo="cancelacion_cambio",
+            referencia_id=devolucion.id,
+            observacion=obs,
+        )
+    # 2) Restaurar lo que se entregó al cliente (vuelve a stock_actual)
+    for reemplazo in devolucion.reemplazos.select_related("producto"):
+        Inventario.objects.get_or_create(
+            producto=reemplazo.producto,
+            tienda=devolucion.tienda,
+            defaults={
+                "stock_actual":  Decimal("0"),
+                "stock_averias": Decimal("0"),
+                "stock_minimo":  Decimal("0"),
+                "stock_maximo":  Decimal("0"),
+            },
+        )
+        inv = Inventario.objects.select_for_update().get(
+            producto=reemplazo.producto,
+            tienda=devolucion.tienda,
+        )
+        inv.stock_actual += reemplazo.cantidad
+        inv.save(update_fields=["stock_actual"])
+        MovimientoInventario.objects.create(
+            producto=reemplazo.producto, tienda=devolucion.tienda,
+            empleado=empleado, tipo="entrada",
+            cantidad=reemplazo.cantidad,
+            referencia_tipo="cancelacion_cambio",
+            referencia_id=devolucion.id,
+            observacion=f"Cancelación DEV-{devolucion.id} | "
+                        f"producto entregado devuelto a inventario",
         )
 
 
@@ -392,10 +499,12 @@ class CambioProductoView(APIView):
             except (CuentaBancaria.DoesNotExist, TypeError, ValueError):
                 pass
 
+        motivo_cambio = request.data.get("motivo_cambio", "averia") or "averia"
         devolucion = serializer.save(
             empleado=request.user,
             tienda=venta.tienda,
             tipo="cambio",
+            motivo_cambio=motivo_cambio,
             producto_reemplazo=primer["producto"],
             cantidad_reemplazo=primer["cantidad"],
             total_reemplazo=total_reemplazo,
@@ -407,7 +516,7 @@ class CambioProductoView(APIView):
             cuenta_destino=cuenta_destino,
         )
 
-        _restaurar_stock(devolucion, request.user, venta)
+        _restaurar_stock_cambio(devolucion, request.user, venta)
 
         # Descontar stock y registrar movimiento por cada reemplazo
         DetalleReemplazo.objects.bulk_create([
@@ -432,6 +541,7 @@ class CambioProductoView(APIView):
                 observacion=f"Cambio DEV-{devolucion.id} | {venta.numero_factura}",
             )
 
+        devolucion_data = DevolucionSerializer(devolucion, context={"request": request}).data
         return Response({
             "detail":                 "Cambio procesado correctamente.",
             "devolucion_id":          devolucion.id,
@@ -454,6 +564,7 @@ class CambioProductoView(APIView):
                 }
                 for r in reemplazos_procesados
             ],
+            "data": devolucion_data,
         }, status=status.HTTP_201_CREATED)
 
 
@@ -465,7 +576,7 @@ class CancelarDevolucionView(APIView):
     def post(self, request, pk):
         try:
             qs = Devolucion.objects.select_related("venta").prefetch_related(
-                "detalles__producto")
+                "detalles__producto", "reemplazos__producto")
             devolucion = qs.get(pk=pk) if es_superadmin(request) \
                 else qs.get(pk=pk,
                             tienda__empresa=get_empresa(request))
@@ -486,7 +597,10 @@ class CancelarDevolucionView(APIView):
                 {"error": "La devolución ya está cancelada."},
                 status=status.HTTP_400_BAD_REQUEST)
 
-        _revertir_stock(devolucion, request.user)
+        if devolucion.tipo == "cambio":
+            _revertir_stock_cambio(devolucion, request.user)
+        else:
+            _revertir_stock(devolucion, request.user)
         devolucion.estado = "cancelada"
         devolucion.save(update_fields=["estado"])
 

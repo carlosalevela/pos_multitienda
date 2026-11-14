@@ -20,6 +20,12 @@ class Devolucion(models.Model):
         ("cambio", "Cambio"),
     ]
 
+    MOTIVOS_CAMBIO = [
+        ("gusto",           "Por gusto"),
+        ("averia",          "Avería"),
+        ("producto_danado", "Producto dañado"),
+    ]
+
     TIPOS_DIFERENCIA = [
         ("exacto", "Exacto"),
         ("cobrar", "Cobrar"),
@@ -50,6 +56,9 @@ class Devolucion(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     # ── Campos de cambio ─────────────────────────────
+    motivo_cambio = models.CharField(
+        max_length=20, choices=MOTIVOS_CAMBIO, blank=True, default=""
+    )
     producto_reemplazo = models.ForeignKey(
         "productos.Producto",
         on_delete=models.PROTECT,

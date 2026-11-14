@@ -439,6 +439,10 @@ class ResumenCierreView(APIView):
                 {"nombre": r.producto.nombre, "cantidad": float(r.cantidad), "subtotal": float(r.subtotal)}
                 for r in d.reemplazos.all()
             ]
+            detalles_lista = [
+                {"nombre": det.producto.nombre, "cantidad": float(det.cantidad), "subtotal": float(det.subtotal)}
+                for det in d.detalles.all()
+            ]
             detalle_devs.append({
                 "id":                  d.id,
                 "venta_numero":        d.venta.numero_factura,
@@ -450,6 +454,7 @@ class ResumenCierreView(APIView):
                 "cuenta_nombre":       d.cuenta_destino.nombre if d.cuenta_destino else None,
                 "producto_reemplazo":  d.producto_reemplazo.nombre if d.producto_reemplazo else None,
                 "reemplazos":          reemplazos_lista,
+                "detalles":            detalles_lista,
             })
 
         # Ventas anuladas durante este turno

@@ -118,7 +118,10 @@ class CerrarCajaView(APIView):
         mixto_ids_con_pago_c = PagoVenta.objects.filter(venta__in=mixto_qs_c).values("venta_id")
         v_mixto_ef_c     = PagoVenta.objects.filter(venta__in=mixto_qs_c, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         v_mixto_legacy_c = mixto_qs_c.exclude(id__in=mixto_ids_con_pago_c).aggregate(t=Sum("total"))["t"] or Decimal("0")
-        total_ventas     = v_ef_puro + v_mixto_ef_c + v_mixto_legacy_c
+        # Efectivo del faltante en ventas bono+efectivo
+        bono_ef_qs_c = Venta.objects.filter(sesion_caja=sesion, estado="completada", metodo_pago="bono_efectivo")
+        v_bono_ef_c  = PagoVenta.objects.filter(venta__in=bono_ef_qs_c, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        total_ventas = v_ef_puro + v_mixto_ef_c + v_mixto_legacy_c + v_bono_ef_c
 
         total_gastos = Gasto.objects.filter(
             sesion_caja=sesion, metodo_pago="efectivo",
@@ -171,9 +174,9 @@ class CerrarCajaView(APIView):
 
             base_v_total   = _Venta.objects.filter(sesion_caja=sesion, estado="completada")
             _v_ef          = base_v_total.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tar         = base_v_total.filter(metodo_pago="tarjeta").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tra         = base_v_total.filter(metodo_pago="transferencia").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_mix         = base_v_total.filter(metodo_pago="mixto").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tar         = base_v_total.filter(metodo_pago__in=["tarjeta", "bono_tarjeta"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tra         = base_v_total.filter(metodo_pago__in=["transferencia", "bono_transferencia"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_mix         = base_v_total.filter(metodo_pago__in=["mixto", "bono_efectivo"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
             _num_v         = base_v_total.count()
 
             from django.utils import timezone as _tz
@@ -357,10 +360,11 @@ class ResumenCierreView(APIView):
         )
 
         v_efectivo      = vsum(base_v.filter(metodo_pago="efectivo"))
-        v_tarjeta       = vsum(base_v.filter(metodo_pago="tarjeta"))
-        v_transferencia = vsum(base_v.filter(metodo_pago="transferencia"))
+        v_tarjeta       = vsum(base_v.filter(metodo_pago__in=["tarjeta", "bono_tarjeta"]))
+        v_transferencia = vsum(base_v.filter(metodo_pago__in=["transferencia", "bono_transferencia"]))
         v_mixto         = vsum(base_v.filter(metodo_pago="mixto"))
-        total_ventas    = v_efectivo + v_tarjeta + v_transferencia + v_mixto
+        v_bono_puro     = vsum(base_v.filter(metodo_pago="bono"))
+        total_ventas    = v_efectivo + v_tarjeta + v_transferencia + v_mixto + v_bono_puro
 
         # Porción efectivo de ventas mixto (usando PagoVenta cuando existe,
         # contando el total completo como fallback para datos sin desglose)
@@ -369,6 +373,10 @@ class ResumenCierreView(APIView):
         v_mixto_ef      = PagoVenta.objects.filter(venta__in=mixto_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         v_mixto_legacy  = mixto_qs.exclude(id__in=mixto_ids_con_pago).aggregate(t=Sum("total"))["t"] or Decimal("0")
         v_mixto_cash    = v_mixto_ef + v_mixto_legacy
+        # Porción efectivo del faltante en ventas bono+efectivo
+        bono_ef_qs      = base_v.filter(metodo_pago="bono_efectivo")
+        v_bono_ef       = PagoVenta.objects.filter(venta__in=bono_ef_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_mixto_cash   += v_bono_ef
 
         g_efectivo     = agg(base_g.filter(metodo_pago="efectivo"))
         g_otros        = agg(base_g.exclude(metodo_pago="efectivo"))

@@ -63,6 +63,7 @@ class VentaSerializer(serializers.ModelSerializer):
     tienda_nombre         = serializers.CharField(source="tienda.nombre", read_only=True)
     cuenta_destino_nombre = serializers.SerializerMethodField()
     cuenta_destino_tipo   = serializers.SerializerMethodField()
+    bono_info             = serializers.SerializerMethodField()
 
     class Meta:
         model  = Venta
@@ -77,7 +78,7 @@ class VentaSerializer(serializers.ModelSerializer):
             "a_credito",
             "monto_recibido", "vuelto",
             "estado", "observaciones",
-            "created_at", "detalles", "pagos"
+            "created_at", "detalles", "pagos", "bono_info"
         ]
         read_only_fields = [
             "id", "numero_factura", "empleado",
@@ -100,6 +101,16 @@ class VentaSerializer(serializers.ModelSerializer):
 
     def get_cuenta_destino_tipo(self, obj):
         return obj.cuenta_destino.get_tipo_display() if obj.cuenta_destino else None
+
+    def get_bono_info(self, obj):
+        uso = obj.usos_bono.select_related('bono').first()
+        if not uso:
+            return None
+        return {
+            'codigo':        uso.bono.codigo,
+            'monto_usado':   float(uso.monto_usado),
+            'saldo_despues': float(uso.saldo_despues),
+        }
 
     def validate_tienda(self, tienda):
         request = self.context.get("request")

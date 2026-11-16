@@ -50,6 +50,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
     detalles = DetalleDevolucionSerializer(many=True)
     reemplazos = DetalleReemplazoSerializer(many=True, read_only=True)
     empleado_nombre = serializers.SerializerMethodField()
+    cliente_nombre  = serializers.SerializerMethodField()
     tienda_nombre = serializers.CharField(source="tienda.nombre", read_only=True)
     venta_numero = serializers.CharField(source="venta.numero_factura", read_only=True)
 
@@ -63,7 +64,7 @@ class DevolucionSerializer(serializers.ModelSerializer):
         fields = [
             "id", "venta", "venta_numero",
             "tienda", "tienda_nombre",
-            "empleado", "empleado_nombre",
+            "empleado", "empleado_nombre", "cliente_nombre",
             "total_devuelto", "metodo_devolucion",
             "tipo",
             "producto_reemplazo",
@@ -97,6 +98,13 @@ class DevolucionSerializer(serializers.ModelSerializer):
             return None
         partes = filter(None, [obj.empleado.nombre, obj.empleado.apellido])
         return " ".join(partes) or None
+
+    def get_cliente_nombre(self, obj):
+        cliente = getattr(obj.venta, 'cliente', None)
+        if not cliente:
+            return 'Consumidor Final'
+        partes = filter(None, [cliente.nombre, cliente.apellido])
+        return " ".join(partes) or 'Consumidor Final'
 
     def get_precio_reemplazo(self, obj):
         if obj.producto_reemplazo:

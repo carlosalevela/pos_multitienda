@@ -108,8 +108,10 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
     ventas_efectivo       = serializers.SerializerMethodField()
     ventas_tarjeta        = serializers.SerializerMethodField()
     ventas_transferencia  = serializers.SerializerMethodField()
-    ventas_mixto          = serializers.SerializerMethodField()
-    ventas_mixto_efectivo = serializers.SerializerMethodField()
+    ventas_mixto              = serializers.SerializerMethodField()
+    ventas_mixto_efectivo     = serializers.SerializerMethodField()
+    ventas_mixto_tarjeta      = serializers.SerializerMethodField()
+    ventas_mixto_transferencia = serializers.SerializerMethodField()
     ventas_bono               = serializers.SerializerMethodField()
     ventas_bono_num           = serializers.SerializerMethodField()
     ventas_bono_efectivo      = serializers.SerializerMethodField()
@@ -150,7 +152,8 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
             "diferencia", "observaciones", "estado",
             "ventas_total", "gastos_total", "num_gastos", "num_transacciones",
             "ventas_efectivo", "ventas_tarjeta", "ventas_transferencia",
-            "ventas_mixto", "ventas_mixto_efectivo", "ventas_bono", "ventas_bono_num",
+            "ventas_mixto", "ventas_mixto_efectivo", "ventas_mixto_tarjeta", "ventas_mixto_transferencia",
+            "ventas_bono", "ventas_bono_num",
             "ventas_bono_efectivo", "ventas_bono_tarjeta", "ventas_bono_transferencia",
             "abonos_efectivo", "abonos_tarjeta", "abonos_transferencia",
             "abonos_total", "abonos_credito_efectivo", "num_abonos",
@@ -280,6 +283,16 @@ class SesionCajaResumenSerializer(serializers.ModelSerializer):
         mx_legacy  = mixto_qs.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
         return float(mx_ef + mx_legacy)
 
+    def get_ventas_mixto_tarjeta(self, obj):
+        from ventas.models import PagoVenta, Venta
+        mixto_qs = Venta.objects.filter(sesion_caja=obj, estado="completada", metodo_pago="mixto")
+        return float(PagoVenta.objects.filter(venta__in=mixto_qs, metodo="tarjeta").aggregate(t=Sum("monto"))["t"] or Decimal("0"))
+
+    def get_ventas_mixto_transferencia(self, obj):
+        from ventas.models import PagoVenta, Venta
+        mixto_qs = Venta.objects.filter(sesion_caja=obj, estado="completada", metodo_pago="mixto")
+        return float(PagoVenta.objects.filter(venta__in=mixto_qs, metodo="transferencia").aggregate(t=Sum("monto"))["t"] or Decimal("0"))
+
     # ── gastos ───────────────────────────────────────────────
 
     def get_num_gastos(self, obj):
@@ -404,8 +417,10 @@ class SesionCajaSerializer(serializers.ModelSerializer):
     ventas_efectivo          = serializers.SerializerMethodField()
     ventas_tarjeta           = serializers.SerializerMethodField()
     ventas_transferencia     = serializers.SerializerMethodField()
-    ventas_mixto             = serializers.SerializerMethodField()
-    ventas_mixto_efectivo    = serializers.SerializerMethodField()
+    ventas_mixto              = serializers.SerializerMethodField()
+    ventas_mixto_efectivo     = serializers.SerializerMethodField()
+    ventas_mixto_tarjeta      = serializers.SerializerMethodField()
+    ventas_mixto_transferencia = serializers.SerializerMethodField()
     ventas_bono               = serializers.SerializerMethodField()
     ventas_bono_num             = serializers.SerializerMethodField()
     ventas_bono_dif_bono_parte  = serializers.SerializerMethodField()
@@ -460,7 +475,9 @@ class SesionCajaSerializer(serializers.ModelSerializer):
             "monto_final_sistema", "monto_final_real",
             "diferencia", "observaciones", "estado",
             "ventas_total", "ventas_efectivo", "ventas_tarjeta",
-            "ventas_transferencia", "ventas_mixto", "ventas_mixto_efectivo", "ventas_bono", "ventas_bono_num",
+            "ventas_transferencia", "ventas_mixto", "ventas_mixto_efectivo",
+            "ventas_mixto_tarjeta", "ventas_mixto_transferencia",
+            "ventas_bono", "ventas_bono_num",
             "ventas_bono_dif_bono_parte", "ventas_bono_dif_num",
             "ventas_bono_efectivo", "ventas_bono_tarjeta", "ventas_bono_transferencia",
             "num_transacciones", "gastos_total", "num_gastos", "gastos_detalle",
@@ -583,6 +600,16 @@ class SesionCajaSerializer(serializers.ModelSerializer):
         mx_ef  = PagoVenta.objects.filter(venta__in=mixto, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         mx_lg  = mixto.exclude(id__in=ids_c).aggregate(t=Sum("total"))["t"] or Decimal("0")
         return float(mx_ef + mx_lg)
+
+    def get_ventas_mixto_tarjeta(self, obj):
+        from ventas.models import PagoVenta, Venta
+        mixto = Venta.objects.filter(sesion_caja=obj, estado="completada", metodo_pago="mixto")
+        return float(PagoVenta.objects.filter(venta__in=mixto, metodo="tarjeta").aggregate(t=Sum("monto"))["t"] or Decimal("0"))
+
+    def get_ventas_mixto_transferencia(self, obj):
+        from ventas.models import PagoVenta, Venta
+        mixto = Venta.objects.filter(sesion_caja=obj, estado="completada", metodo_pago="mixto")
+        return float(PagoVenta.objects.filter(venta__in=mixto, metodo="transferencia").aggregate(t=Sum("monto"))["t"] or Decimal("0"))
 
     def get_num_transacciones(self, obj):
         from ventas.models import Venta

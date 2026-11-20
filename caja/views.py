@@ -860,9 +860,9 @@ class EnviarPdfWhatsAppView(APIView):
             ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
             from caja.models import MovimientoCaja as _Mov
-            _abonos_ef  = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado", metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
-            _abonos_tot = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado").aggregate(t=Sum("monto"))["t"] or Decimal("0")
-            _abonos_n   = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado").count()
+            _abonos_ef  = _Mov.objects.filter(sesion=sesion, tipo="abono_separado", metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _abonos_tot = _Mov.objects.filter(sesion=sesion, tipo="abono_separado").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _abonos_n   = _Mov.objects.filter(sesion=sesion, tipo="abono_separado").count()
             _dev_neto   = float(sesion.devoluciones_efectivo or 0)
 
             enviar_registro_movimiento_diario(

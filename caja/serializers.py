@@ -18,6 +18,7 @@ class SesionCajaListaSerializer(serializers.ModelSerializer):
     ventas_total    = serializers.DecimalField(
         source="ventas_total_ann", max_digits=12, decimal_places=2, read_only=True
     )
+    monto_esperado  = serializers.SerializerMethodField()
 
     class Meta:
         model  = SesionCaja
@@ -26,12 +27,49 @@ class SesionCajaListaSerializer(serializers.ModelSerializer):
             "tienda", "tienda_nombre",
             "empleado", "empleado_nombre",
             "diferencia", "ventas_total",
+            "monto_final_sistema", "saldo_inicial",
+            "monto_esperado",
         ]
 
     def get_empleado_nombre(self, obj):
         if obj.empleado:
             return f"{obj.empleado.nombre} {obj.empleado.apellido}"
         return None
+
+    def get_monto_esperado(self, obj):
+        from ventas.models import PagoVenta, Venta
+        from contabilidad.models import Gasto
+        from devoluciones.models import Devolucion
+        from django.utils import timezone
+
+        def agg(qs): return qs.aggregate(t=Sum("monto"))["t"] or Decimal("0")
+
+        base_v     = Venta.objects.filter(sesion_caja=obj, estado="completada")
+        v_ef       = base_v.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
+        mixto      = base_v.filter(metodo_pago="mixto")
+        ids_con    = PagoVenta.objects.filter(venta__in=mixto).values("venta_id")
+        v_mx_ef    = PagoVenta.objects.filter(venta__in=mixto, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_mx_lg    = mixto.exclude(id__in=ids_con).aggregate(t=Sum("total"))["t"] or Decimal("0")
+        v_mx       = v_mx_ef + v_mx_lg
+        bono_ef_qs = base_v.filter(metodo_pago="bono_efectivo")
+        bono_ef_t  = bono_ef_qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_ef_b  = PagoVenta.objects.filter(venta__in=bono_ef_qs, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_bono_ef  = bono_ef_t - bono_ef_b
+        g_ef   = agg(Gasto.objects.filter(sesion_caja=obj, metodo_pago="efectivo"))
+        a_ef   = agg(obj.movimientos.filter(tipo="abono_separado",      metodo_pago="efectivo"))
+        ac_ef  = agg(obj.movimientos.filter(tipo="abono_credito",        metodo_pago="efectivo"))
+        cs_ef  = agg(obj.movimientos.filter(tipo="cancelacion_separado", metodo_pago="efectivo"))
+        im_ef  = agg(obj.movimientos.filter(tipo="ingreso_manual",       metodo_pago="efectivo"))
+        cierre = obj.fecha_cierre or timezone.now()
+        base_d = Devolucion.objects.filter(
+            tienda=obj.tienda, estado="procesada",
+            created_at__gte=obj.fecha_apertura, created_at__lte=cierre,
+        )
+        dev_d  = base_d.filter(tipo="devolucion", metodo_devolucion="efectivo").aggregate(t=Sum("total_devuelto"))["t"] or Decimal("0")
+        cob_d  = base_d.filter(tipo="cambio", tipo_diferencia="cobrar",   metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
+        dv_d   = base_d.filter(tipo="cambio", tipo_diferencia="devolver", metodo_pago_diferencia="efectivo").aggregate(t=Sum("diferencia"))["t"] or Decimal("0")
+        dev_ef = dev_d + dv_d - cob_d
+        return float(obj.monto_inicial + v_ef + v_mx + v_bono_ef + a_ef + ac_ef + im_ef - g_ef - dev_ef - cs_ef)
 
     @staticmethod
     def anotaciones():

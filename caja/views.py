@@ -10,6 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from bonos.models import Bono
 from contabilidad.models import Gasto
 from core.permissions import EsAdminOSupervisor, es_superadmin, get_empresa
 from devoluciones.models import Devolucion
@@ -118,9 +119,11 @@ class CerrarCajaView(APIView):
         mixto_ids_con_pago_c = PagoVenta.objects.filter(venta__in=mixto_qs_c).values("venta_id")
         v_mixto_ef_c     = PagoVenta.objects.filter(venta__in=mixto_qs_c, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         v_mixto_legacy_c = mixto_qs_c.exclude(id__in=mixto_ids_con_pago_c).aggregate(t=Sum("total"))["t"] or Decimal("0")
-        # Efectivo del faltante en ventas bono+efectivo
-        bono_ef_qs_c = Venta.objects.filter(sesion_caja=sesion, estado="completada", metodo_pago="bono_efectivo")
-        v_bono_ef_c  = PagoVenta.objects.filter(venta__in=bono_ef_qs_c, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        # Efectivo del faltante en ventas bono+efectivo (total - porción bono, robusto ante PagoVenta faltantes)
+        bono_ef_qs_c    = Venta.objects.filter(sesion_caja=sesion, estado="completada", metodo_pago="bono_efectivo")
+        bono_ef_total_c = bono_ef_qs_c.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_ef_bono_c  = PagoVenta.objects.filter(venta__in=bono_ef_qs_c, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_bono_ef_c     = bono_ef_total_c - bono_ef_bono_c
         total_ventas = v_ef_puro + v_mixto_ef_c + v_mixto_legacy_c + v_bono_ef_c
 
         total_gastos = Gasto.objects.filter(
@@ -167,68 +170,8 @@ class CerrarCajaView(APIView):
         sesion.fecha_cierre        = timezone.now()
         sesion.save()
 
-        # ── WhatsApp: notificar cierre de turno ──────────────────
-        try:
-            from configuracion.whatsapp_service import enviar_cierre_turno
-            from ventas.models import Venta as _Venta
-
-            base_v_total   = _Venta.objects.filter(sesion_caja=sesion, estado="completada")
-            _v_ef          = base_v_total.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tar         = base_v_total.filter(metodo_pago__in=["tarjeta", "bono_tarjeta"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tra         = base_v_total.filter(metodo_pago__in=["transferencia", "bono_transferencia"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_mix         = base_v_total.filter(metodo_pago__in=["mixto", "bono_efectivo"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _num_v         = base_v_total.count()
-
-            from django.utils import timezone as _tz
-            _fecha = _tz.localtime(sesion.fecha_cierre or _tz.now())
-            _meses = ["", "Ene", "Feb", "Mar", "Abr", "May", "Jun",
-                      "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-            _fecha_str = (
-                f"{_fecha.day} {_meses[_fecha.month]} {_fecha.year}, "
-                f"{_fecha.hour:02d}:{_fecha.minute:02d}"
-            )
-
-            _nombre_emp = (
-                f"{sesion.empleado.nombre} {sesion.empleado.apellido}"
-                if sesion.empleado else "—"
-            )
-
-            enviar_cierre_turno(
-                empresa_id=sesion.tienda.empresa_id,
-                tienda_id=sesion.tienda_id,
-                datos={
-                    "tienda_nombre":      sesion.tienda.nombre,
-                    "colaborador_nombre": _nombre_emp,
-                    "fecha_cierre":       _fecha_str,
-                    "monto_inicial":      float(sesion.monto_inicial),
-                    "ventas": {
-                        "total":             float(_v_ef + _v_tar + _v_tra + _v_mix),
-                        "efectivo":          float(_v_ef),
-                        "tarjeta":           float(_v_tar),
-                        "transferencia":     float(_v_tra),
-                        "mixto":             float(_v_mix),
-                        "num_transacciones": _num_v,
-                    },
-                    "abonos_separados": {
-                        "total":    float(abonos_total),
-                        "efectivo": float(abonos_efectivo),
-                        "cantidad": sesion.movimientos.filter(tipo="abono_separado").count(),
-                    },
-                    "credito_efectivo":       float(credito_efectivo),
-                    "cancelaciones_efectivo": float(cancelaciones_efectivo),
-                    "ingresos_manual":        float(ingresos_manual),
-                    "devoluciones_neto_ef":   float(neto_dev_efectivo),
-                    "total_gastos":           float(total_gastos),
-                    "monto_esperado":         float(monto_sistema),
-                    "monto_contado":          float(sesion.monto_final_real or 0),
-                    "diferencia":             float(diferencia),
-                },
-            )
-        except Exception as _wa_exc:
-            import traceback, logging as _log
-            _log.getLogger(__name__).error(
-                "WhatsApp cierre error: %s\n%s", _wa_exc, traceback.format_exc()
-            )
+        # WhatsApp se envía desde Flutter al confirmar el registro físico (paso 4)
+        # para que PDF y texto lleguen juntos una sola vez.
 
         return Response({
             "detail":               "Caja cerrada correctamente.",
@@ -360,8 +303,12 @@ class ResumenCierreView(APIView):
         )
 
         v_efectivo      = vsum(base_v.filter(metodo_pago="efectivo"))
-        v_tarjeta       = vsum(base_v.filter(metodo_pago__in=["tarjeta", "bono_tarjeta"]))
-        v_transferencia = vsum(base_v.filter(metodo_pago__in=["transferencia", "bono_transferencia"]))
+        v_tarjeta_puro  = vsum(base_v.filter(metodo_pago="tarjeta"))
+        v_tarjeta_bono  = vsum(base_v.filter(metodo_pago="bono_tarjeta"))   # total tx para revenue
+        v_tarjeta       = v_tarjeta_puro + v_tarjeta_bono
+        v_transfer_puro = vsum(base_v.filter(metodo_pago="transferencia"))
+        v_transfer_bono = vsum(base_v.filter(metodo_pago="bono_transferencia"))  # total tx para revenue
+        v_transferencia = v_transfer_puro + v_transfer_bono
         v_mixto         = vsum(base_v.filter(metodo_pago="mixto"))
         v_bono_puro     = vsum(base_v.filter(metodo_pago="bono"))
         total_ventas    = v_efectivo + v_tarjeta + v_transferencia + v_mixto + v_bono_puro
@@ -373,20 +320,47 @@ class ResumenCierreView(APIView):
         v_mixto_ef      = PagoVenta.objects.filter(venta__in=mixto_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
         v_mixto_legacy  = mixto_qs.exclude(id__in=mixto_ids_con_pago).aggregate(t=Sum("total"))["t"] or Decimal("0")
         v_mixto_cash    = v_mixto_ef + v_mixto_legacy
-        # Porción efectivo del faltante en ventas bono+efectivo
-        bono_ef_qs      = base_v.filter(metodo_pago="bono_efectivo")
-        v_bono_ef       = PagoVenta.objects.filter(venta__in=bono_ef_qs, metodo="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
-        v_mixto_cash   += v_bono_ef
+        # Porciones reales de ventas bono-mixtas
+        # Usamos total_tx - porción_bono para ser robustos ante PagoVenta faltantes
+        bono_ef_qs         = base_v.filter(metodo_pago="bono_efectivo")
+        bono_ef_total      = bono_ef_qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_ef_bono_part  = PagoVenta.objects.filter(venta__in=bono_ef_qs,  metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_bono_ef          = bono_ef_total - bono_ef_bono_part
+
+        bono_tar_qs        = base_v.filter(metodo_pago="bono_tarjeta")
+        bono_tar_total     = bono_tar_qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_tar_bono_part = PagoVenta.objects.filter(venta__in=bono_tar_qs, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_bono_tar_pago    = bono_tar_total - bono_tar_bono_part
+
+        bono_tra_qs        = base_v.filter(metodo_pago="bono_transferencia")
+        bono_tra_total     = bono_tra_qs.aggregate(t=Sum("total"))["t"] or Decimal("0")
+        bono_tra_bono_part = PagoVenta.objects.filter(venta__in=bono_tra_qs, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+        v_bono_tra_pago    = bono_tra_total - bono_tra_bono_part
+
+        v_mixto_cash      += v_bono_ef
 
         g_efectivo     = agg(base_g.filter(metodo_pago="efectivo"))
         g_otros        = agg(base_g.exclude(metodo_pago="efectivo"))
         detalle_gastos = list(base_g.values("categoria", "monto", "metodo_pago"))
 
-        base_a          = sesion.movimientos.filter(tipo="abono_separado")
-        a_efectivo      = agg(base_a.filter(metodo_pago="efectivo"))
-        a_transferencia = agg(base_a.filter(metodo_pago="transferencia"))
-        a_tarjeta       = agg(base_a.filter(metodo_pago="tarjeta"))
-        num_abonos      = base_a.count()
+        base_a      = sesion.movimientos.filter(tipo="abono_separado")
+        base_a_ini  = base_a.filter(descripcion__icontains="Abono inicial")
+        base_a_post = base_a.exclude(descripcion__icontains="Abono inicial")
+
+        # Depósitos iniciales → INGRESOS SEPARADOS
+        a_ini_ef  = agg(base_a_ini.filter(metodo_pago="efectivo"))
+        a_ini_tar = agg(base_a_ini.filter(metodo_pago="tarjeta"))
+        a_ini_tra = agg(base_a_ini.filter(metodo_pago="transferencia"))
+        num_ingresos_sep = base_a_ini.count()
+
+        # Abonos posteriores → ABONOS PAGOS CLIENTES
+        a_post_ef  = agg(base_a_post.filter(metodo_pago="efectivo"))
+        a_post_tar = agg(base_a_post.filter(metodo_pago="tarjeta"))
+        a_post_tra = agg(base_a_post.filter(metodo_pago="transferencia"))
+        num_abonos = base_a_post.count()
+
+        # Total efectivo abono_separado (para monto_esperado — invariante)
+        a_efectivo = a_ini_ef + a_post_ef
 
         detalle_abonos = []
         for m in base_a.select_related("cuenta_bancaria").order_by("created_at"):
@@ -480,6 +454,13 @@ class ResumenCierreView(APIView):
                 "empleado":       emp_a,
             })
 
+        # Compra de bonos (bonos creados/vendidos en esta sesión)
+        bonos_creados_qs = Bono.objects.filter(venta_origen__sesion_caja=sesion)
+        bono_compra_ef   = bonos_creados_qs.filter(metodo_pago="efectivo").aggregate(t=Sum("valor_original"))["t"] or Decimal("0")
+        bono_compra_tar  = bonos_creados_qs.filter(metodo_pago="tarjeta").aggregate(t=Sum("valor_original"))["t"] or Decimal("0")
+        bono_compra_tra  = bonos_creados_qs.filter(metodo_pago="transferencia").aggregate(t=Sum("valor_original"))["t"] or Decimal("0")
+        num_bonos_creados = bonos_creados_qs.count()
+
         monto_esperado = (
             sesion.monto_inicial + v_efectivo + v_mixto_cash
             + a_efectivo + ac_efectivo
@@ -500,29 +481,43 @@ class ResumenCierreView(APIView):
             "monto_inicial":   float(sesion.monto_inicial),
             "ventas": {
                 "efectivo":          float(v_efectivo),
-                "tarjeta":           float(v_tarjeta),
-                "transferencia":     float(v_transferencia),
+                "tarjeta":            float(v_tarjeta_puro),
+                "bono_tarjeta":       float(v_bono_tar_pago),
+                "transferencia":      float(v_transfer_puro),
+                "bono_transferencia": float(v_bono_tra_pago),
+                "bono_efectivo":      float(v_bono_ef),
                 "mixto":             float(v_mixto),
-                "mixto_efectivo":    float(v_mixto_cash),
+                "mixto_efectivo":    float(v_mixto_cash - v_bono_ef),
+                "bono":              float(v_bono_puro),
+                "bono_num":          int(base_v.filter(metodo_pago="bono").count()),
+                "bono_dif_bono_parte": float(bono_ef_bono_part + bono_tar_bono_part + bono_tra_bono_part),
+                "bono_dif_num":      int(bono_ef_qs.count() + bono_tar_qs.count() + bono_tra_qs.count()),
                 "total":             float(total_ventas),
                 "num_transacciones": base_v.count(),
             },
             "gastos": {
-                "efectivo": float(g_efectivo),
-                "otros":    float(g_otros),
-                "total":    float(g_efectivo + g_otros),
-                "detalle":  detalle_gastos,
+                "efectivo":  float(g_efectivo),
+                "otros":     float(g_otros),
+                "total":     float(g_efectivo + g_otros),
+                "cantidad":  base_g.count(),
+                "detalle":   detalle_gastos,
             },
             "abonos": {
-                "efectivo":               float(a_efectivo),
-                "transferencia":          float(a_transferencia),
-                "tarjeta":                float(a_tarjeta),
-                "total":                  float(a_efectivo + a_transferencia + a_tarjeta),
+                # Abonos posteriores (ABONOS PAGOS CLIENTES)
+                "efectivo":               float(a_post_ef),
+                "transferencia":          float(a_post_tra),
+                "tarjeta":                float(a_post_tar),
+                "total":                  float(a_post_ef + a_post_tar + a_post_tra),
                 "cantidad":               num_abonos,
                 "credito_efectivo":       float(ac_efectivo),
                 "cancelaciones_efectivo": float(cs_efectivo),
                 "ingresos_manual":        float(im_efectivo),
                 "detalle":                detalle_abonos,
+                # Depósitos iniciales (INGRESOS SEPARADOS)
+                "ingreso_sep_efectivo":      float(a_ini_ef),
+                "ingreso_sep_tarjeta":       float(a_ini_tar),
+                "ingreso_sep_transferencia": float(a_ini_tra),
+                "num_ingresos_sep":          num_ingresos_sep,
             },
             "devoluciones": {
                 "efectivo":           float(dev_efectivo),
@@ -543,6 +538,13 @@ class ResumenCierreView(APIView):
                 "cantidad":      base_anuladas.count(),
                 "total_anulado": float(total_anulado),
                 "detalle":       detalle_anuladas,
+            },
+            "compra_bonos": {
+                "efectivo":      float(bono_compra_ef),
+                "tarjeta":       float(bono_compra_tar),
+                "transferencia": float(bono_compra_tra),
+                "total":         float(bono_compra_ef + bono_compra_tar + bono_compra_tra),
+                "cantidad":      num_bonos_creados,
             },
             "monto_esperado_caja": float(monto_esperado),
             "ventas_detalle":      ventas_detalle,
@@ -818,10 +820,10 @@ class EnviarPdfWhatsAppView(APIView):
 
         from configuracion.whatsapp_service import (
             enviar_pdf_cierre_template,
-            enviar_cierre_turno,
+            enviar_registro_movimiento_diario,
         )
 
-        # 1 — PDF template
+        # 1 — PDF
         resultado = enviar_pdf_cierre_template(
             empresa_id=sesion.tienda.empresa_id,
             tienda_id=sesion.tienda_id,
@@ -831,13 +833,13 @@ class EnviarPdfWhatsAppView(APIView):
             fecha=fecha,
         )
 
-        # 2 — Texto de resumen (mismo bloque que el cierre automático)
+        # 2 — Texto: Registro de Movimiento Diario
         try:
             base_v = Venta.objects.filter(sesion_caja=sesion, estado="completada")
             _v_ef  = base_v.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tar = base_v.filter(metodo_pago="tarjeta").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_tra = base_v.filter(metodo_pago="transferencia").aggregate(t=Sum("total"))["t"] or Decimal("0")
-            _v_mix = base_v.filter(metodo_pago="mixto").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tar = base_v.filter(metodo_pago__in=["tarjeta", "bono_tarjeta"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_tra = base_v.filter(metodo_pago__in=["transferencia", "bono_transferencia"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _v_mix = base_v.filter(metodo_pago__in=["mixto", "bono_efectivo"]).aggregate(t=Sum("total"))["t"] or Decimal("0")
             _num_v = base_v.count()
 
             from django.utils import timezone as _tz
@@ -852,20 +854,25 @@ class EnviarPdfWhatsAppView(APIView):
                 f"{sesion.empleado.nombre} {sesion.empleado.apellido}"
                 if sesion.empleado else "—"
             )
-
             from contabilidad.models import Gasto as _Gasto
             _gastos_total = _Gasto.objects.filter(
                 sesion_caja=sesion
             ).aggregate(t=Sum("monto"))["t"] or Decimal("0")
 
-            enviar_cierre_turno(
+            from caja.models import MovimientoCaja as _Mov
+            _abonos_ef  = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado", metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _abonos_tot = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _abonos_n   = _Mov.objects.filter(sesion_caja=sesion, tipo="abono_separado").count()
+            _dev_neto   = float(sesion.devoluciones_efectivo or 0)
+
+            enviar_registro_movimiento_diario(
                 empresa_id=sesion.tienda.empresa_id,
                 tienda_id=sesion.tienda_id,
                 datos={
-                    "tienda_nombre":          sesion.tienda.nombre,
-                    "colaborador_nombre":     _nombre_emp,
-                    "fecha_cierre":           _fecha_str,
-                    "monto_inicial":          float(sesion.monto_inicial),
+                    "tienda_nombre":      sesion.tienda.nombre,
+                    "colaborador_nombre": _nombre_emp,
+                    "fecha_cierre":       _fecha_str,
+                    "monto_inicial":      float(sesion.monto_inicial),
                     "ventas": {
                         "total":             float(_v_ef + _v_tar + _v_tra + _v_mix),
                         "efectivo":          float(_v_ef),
@@ -874,20 +881,19 @@ class EnviarPdfWhatsAppView(APIView):
                         "mixto":             float(_v_mix),
                         "num_transacciones": _num_v,
                     },
-                    "abonos_separados":       {"total": 0, "efectivo": 0, "cantidad": 0},
-                    "credito_efectivo":       float(sesion.monto_final_real or 0),
-                    "cancelaciones_efectivo": 0,
-                    "ingresos_manual":        0,
-                    "devoluciones_neto_ef":   0,
-                    "total_gastos":           float(_gastos_total),
-                    "monto_esperado":         float(sesion.monto_final_sistema or 0),
-                    "monto_contado":          float(sesion.monto_final_real or 0),
-                    "diferencia":             float(sesion.diferencia or 0),
+                    "abonos_separados": {
+                        "total":    float(_abonos_tot),
+                        "efectivo": float(_abonos_ef),
+                        "cantidad": _abonos_n,
+                    },
+                    "devoluciones_neto_ef": _dev_neto,
+                    "total_gastos":         float(_gastos_total),
+                    "monto_esperado":       float(sesion.monto_final_sistema or 0),
                 },
             )
         except Exception as _exc:
             import logging as _log
-            _log.getLogger(__name__).error("WA reenviar resumen error: %s", _exc)
+            _log.getLogger(__name__).error("WA registro movimiento error: %s", _exc)
 
         return Response({
             "success":  resultado["enviados"] > 0,

@@ -108,7 +108,8 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
 
 
 def _enviar_template(token: str, phone_number_id: str, numero: str,
-                     header_params: list[str], body_params: list[str]):
+                     header_params: list[str], body_params: list[str],
+                     template_name: str = _TEMPLATE_NAME):
     url = _API_URL.format(phone_number_id=phone_number_id)
     headers = {
         "Authorization": f"Bearer {token}",
@@ -129,7 +130,7 @@ def _enviar_template(token: str, phone_number_id: str, numero: str,
         "to":   numero,
         "type": "template",
         "template": {
-            "name":       _TEMPLATE_NAME,
+            "name":       template_name,
             "language":   {"code": _TEMPLATE_LANG},
             "components": components,
         },
@@ -424,3 +425,98 @@ def enviar_recordatorio_separado(empresa_id: int, tienda_id: int, separados: lis
             errores.append(f"{s['cliente_nombre']} ({numero}): {exc}")
 
     return {"enviados": enviados, "sin_telefono": sin_telefono, "errores": errores}
+
+
+# ── Registro de Movimiento Diario ─────────────────────────
+_TEMPLATE_REGISTRO = "registro_movimiento_diario"
+
+
+def _construir_parametros_registro(datos: dict) -> list[str]:
+    """
+    Plantilla registro_movimiento_diario:
+      Header → texto fijo "REGISTRO DE MOVIMIENTO DIARIO"
+      Body   → {{1}} tienda | {{2}} fecha | {{3}} encargado
+               {{4}} ventas del turno | {{5}} cuadre de efectivo
+    """
+    v        = datos.get("ventas", {})
+    gastos   = datos.get("total_gastos", 0)
+    esperado = datos.get("monto_esperado", 0)
+    ini      = datos.get("monto_inicial", 0)
+    sep      = datos.get("abonos_separados", {})
+    dev      = datos.get("devoluciones_neto_ef", 0)
+
+    # {{4}} Ventas del turno
+    partes_v = []
+    if v.get("efectivo", 0):
+        partes_v.append(f"Efectivo {_fmt(v['efectivo'])}")
+    if v.get("tarjeta", 0):
+        partes_v.append(f"Tarjeta {_fmt(v['tarjeta'])}")
+    if v.get("transferencia", 0):
+        partes_v.append(f"Transfer {_fmt(v['transferencia'])}")
+    if v.get("mixto", 0):
+        partes_v.append(f"Mixto {_fmt(v['mixto'])}")
+    num = v.get("num_transacciones", 0)
+    partes_v.append(f"TOTAL {_fmt(v.get('total', 0))} ({num} venta{'s' if num != 1 else ''})")
+    ventas_str = " | ".join(partes_v) if partes_v else "Sin ventas"
+
+    # {{5}} Cuadre de efectivo
+    cuadre = []
+    if ini:
+        cuadre.append(f"Inicial {_fmt(ini)}")
+    if v.get("efectivo", 0):
+        cuadre.append(f"+Ventas {_fmt(v['efectivo'])}")
+    if sep.get("efectivo", 0):
+        cuadre.append(f"+Abonos {_fmt(sep['efectivo'])}")
+    if dev:
+        cuadre.append(f"-Devoluc {_fmt(dev)}")
+    if gastos:
+        cuadre.append(f"-Gastos {_fmt(gastos)}")
+    cuadre.append(f"Esperado {_fmt(esperado)}")
+    entregar = esperado - ini
+    if entregar > 0:
+        cuadre.append(f"ENTREGAR {_fmt(entregar)}")
+    cuadre_str = " | ".join(cuadre)
+
+    return [
+        datos.get("tienda_nombre", "—"),           # {{1}}
+        datos.get("fecha_cierre", "—"),             # {{2}}
+        datos.get("colaborador_nombre", "—"),        # {{3}}
+        ventas_str,                                  # {{4}}
+        cuadre_str,                                  # {{5}}
+    ]
+
+
+def enviar_registro_movimiento_diario(empresa_id: int, tienda_id: int, datos: dict):
+    """
+    Envía el Registro de Movimiento Diario por WhatsApp usando la plantilla aprobada.
+    Se ejecuta en un hilo para no bloquear la respuesta HTTP.
+    datos: mismo formato que enviar_cierre_turno.
+    """
+    from .models import WhatsAppConfig, WhatsAppDestinatario
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return
+
+    destinatarios = list(WhatsAppDestinatario.objects.filter(
+        empresa_id=empresa_id, activo=True,
+    ))
+    destinatarios = [
+        d for d in destinatarios
+        if not d.tiendas.exists() or d.tiendas.filter(id=tienda_id).exists()
+    ]
+
+    if not destinatarios:
+        logger.warning("WA registro: sin destinatarios para tienda_id=%s", tienda_id)
+        return
+
+    body_params = _construir_parametros_registro(datos)
+
+    def _enviar_todos():
+        for d in destinatarios:
+            _enviar_template(cfg.token, cfg.phone_number_id, d.numero,
+                             [], body_params, template_name=_TEMPLATE_REGISTRO)
+
+    threading.Thread(target=_enviar_todos, daemon=True).start()

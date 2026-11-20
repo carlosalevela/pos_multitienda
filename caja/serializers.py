@@ -15,6 +15,9 @@ class SesionCajaListaSerializer(serializers.ModelSerializer):
 
     tienda_nombre   = serializers.CharField(source="tienda.nombre", read_only=True)
     empleado_nombre = serializers.SerializerMethodField()
+    saldo_inicial   = serializers.DecimalField(
+        source="monto_inicial", max_digits=12, decimal_places=2, read_only=True
+    )
     ventas_total    = serializers.DecimalField(
         source="ventas_total_ann", max_digits=12, decimal_places=2, read_only=True
     )

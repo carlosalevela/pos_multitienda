@@ -5,9 +5,10 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-_API_URL   = "https://graph.facebook.com/v25.0/{phone_number_id}/messages"
-_MEDIA_URL = "https://graph.facebook.com/v25.0/{phone_number_id}/media"
-_TEMPLATE_NAME = "cierre_turno_v2"
+_API_URL        = "https://graph.facebook.com/v25.0/{phone_number_id}/messages"
+_MEDIA_URL      = "https://graph.facebook.com/v25.0/{phone_number_id}/media"
+_TEMPLATE_NAME  = "cierre_turno_v2"
+_TEMPLATE_V3    = "cierre_turno_v3"
 _TEMPLATE_LANG  = "es_CO"
 
 
@@ -105,6 +106,112 @@ def _construir_parametros(datos: dict) -> tuple[list[str], list[str]]:
         cuadre,                                                                # {{6}}
     ]
     return header_params, body_params
+
+
+def _construir_parametros_v3(datos: dict) -> list[str]:
+    """
+    Plantilla cierre_turno_v3 (12 params):
+      {{1}} Tienda  {{2}} Cajero  {{3}} Fecha
+      {{4}} Efectivo ventas  {{5}} Tarjeta  {{6}} Transferencia
+      {{7}} Abonos y separados  {{8}} Gastos
+      {{9}} Bonos  {{10}} Efectivo en caja
+      {{11}} Diferencia  {{12}} Total a entregar
+    """
+    v        = datos.get("ventas", {})
+    ini      = datos.get("monto_inicial", 0)
+    sep      = datos.get("abonos_separados", {})
+    gastos   = datos.get("total_gastos", 0)
+    bonos    = datos.get("bonos", {})
+    contado  = datos.get("monto_contado", 0)
+    esperado = datos.get("monto_esperado", 0)
+    dif      = datos.get("diferencia", 0)
+
+    # {{7}} Abonos y separados
+    sep_total = sep.get("total", 0)
+    sep_cant  = sep.get("cantidad", 0)
+    if sep_total:
+        abonos_str = f"{_fmt(sep_total)} ({sep_cant} pago{'s' if sep_cant != 1 else ''})"
+    else:
+        abonos_str = "Sin abonos"
+
+    # {{8}} Gastos
+    gastos_str = _fmt(gastos) if gastos else "$0"
+
+    # {{9}} Bonos
+    bono_redim  = bonos.get("redimidos", 0)
+    bono_compra = bonos.get("compra", 0)
+    if bono_redim or bono_compra:
+        bonos_parts = []
+        if bono_redim:
+            bonos_parts.append(f"Redimidos {_fmt(bono_redim)}")
+        if bono_compra:
+            bonos_parts.append(f"Compra {_fmt(bono_compra)}")
+        bono_dif = bono_compra - bono_redim
+        if bono_dif != 0:
+            bonos_parts.append(f"Dif {_fmt(abs(bono_dif))}")
+        bonos_str = " | ".join(bonos_parts)
+    else:
+        bonos_str = "Sin bonos"
+
+    # {{11}} Diferencia
+    if dif == 0:
+        dif_str = "CUADRE OK ✅"
+    elif dif < 0:
+        dif_str = f"FALTANTE {_fmt(abs(dif))} ❌"
+    else:
+        dif_str = f"SOBRANTE {_fmt(dif)} ⚠️"
+
+    # {{12}} Total a entregar (lo que el cajero entrega sin contar la base)
+    entregar = max(esperado - ini, 0)
+
+    return [
+        datos.get("tienda_nombre", "—"),           # {{1}}
+        datos.get("colaborador_nombre") or datos.get("empleado_nombre", "—"),  # {{2}}
+        datos.get("fecha_cierre", "—"),             # {{3}}
+        _fmt(v.get("efectivo", 0)),                 # {{4}}
+        _fmt(v.get("tarjeta", 0)),                  # {{5}}
+        _fmt(v.get("transferencia", 0)),            # {{6}}
+        abonos_str,                                 # {{7}}
+        gastos_str,                                 # {{8}}
+        bonos_str,                                  # {{9}}
+        _fmt(contado),                              # {{10}}
+        dif_str,                                    # {{11}}
+        _fmt(entregar),                             # {{12}}
+    ]
+
+
+def enviar_cierre_turno_v3(empresa_id: int, tienda_id: int, datos: dict):
+    """
+    Envía el resumen de cierre usando la plantilla cierre_turno_v3 (12 params).
+    Se ejecuta en un hilo para no bloquear la respuesta HTTP.
+    """
+    from .models import WhatsAppConfig, WhatsAppDestinatario
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return
+
+    destinatarios = list(WhatsAppDestinatario.objects.filter(
+        empresa_id=empresa_id, activo=True,
+    ))
+    destinatarios = [
+        d for d in destinatarios
+        if not d.tiendas.exists() or d.tiendas.filter(id=tienda_id).exists()
+    ]
+    if not destinatarios:
+        logger.warning("WA v3: sin destinatarios para tienda_id=%s", tienda_id)
+        return
+
+    body_params = _construir_parametros_v3(datos)
+
+    def _enviar_todos():
+        for d in destinatarios:
+            _enviar_template(cfg.token, cfg.phone_number_id, d.numero,
+                             [], body_params, template_name=_TEMPLATE_V3)
+
+    threading.Thread(target=_enviar_todos, daemon=True).start()
 
 
 def _enviar_template(token: str, phone_number_id: str, numero: str,
@@ -270,7 +377,9 @@ def enviar_pdf_cierre(empresa_id: int, tienda_id: int,
 
 
 # ── Envío de PDF con template aprobado cierre_pdf ────────
-_TEMPLATE_PDF = "cierre_pdf"
+_TEMPLATE_PDF                = "cierre_pdf"
+_TEMPLATE_FORMATO_DIARIO     = "foto_registro_diario_"
+_TEMPLATE_FORMATO_DIARIO_LANG = "es_CO"
 
 
 def enviar_pdf_cierre_template(empresa_id: int, tienda_id: int,
@@ -348,6 +457,91 @@ def enviar_pdf_cierre_template(empresa_id: int, tienda_id: int,
                 errores.append(f"{d.numero}: {r.text[:80]}")
             else:
                 logger.info("WA cierre_pdf enviado a %s", d.numero)
+                enviados += 1
+        except Exception as exc:
+            errores.append(f"{d.numero}: {exc}")
+
+    return {"enviados": enviados, "errores": errores}
+
+
+# ── Formato de Movimiento Diario por WhatsApp ────────────
+
+def enviar_foto_registro_diario(empresa_id: int, tienda_id: int,
+                                 pdf_bytes: bytes, filename: str,
+                                 tienda_nombre: str, fecha: str) -> dict:
+    """
+    Sube el PDF del Registro de Movimiento Diario a Meta y lo envía
+    usando el template 'foto_registro_diario'.
+    Body: {{1}} = tienda_nombre, {{2}} = fecha (DD/MM/YYYY).
+    """
+    from .models import WhatsAppConfig, WhatsAppDestinatario
+
+    try:
+        cfg = WhatsAppConfig.objects.get(empresa_id=empresa_id, activo=True)
+    except WhatsAppConfig.DoesNotExist:
+        logger.warning("WA: no hay WhatsAppConfig para empresa_id=%s", empresa_id)
+        return {"enviados": 0, "errores": ["Sin configuración de WhatsApp."]}
+
+    destinatarios = list(WhatsAppDestinatario.objects.filter(
+        empresa_id=empresa_id, activo=True,
+    ))
+    destinatarios = [
+        d for d in destinatarios
+        if not d.tiendas.exists() or d.tiendas.filter(id=tienda_id).exists()
+    ]
+    if not destinatarios:
+        return {"enviados": 0, "errores": ["Sin destinatarios configurados."]}
+
+    try:
+        media_id = _subir_pdf(cfg.token, cfg.phone_number_id, pdf_bytes, filename)
+    except Exception as exc:
+        logger.error("WA: error subiendo formato diario: %s", exc)
+        return {"enviados": 0, "errores": [f"Error subiendo PDF: {exc}"]}
+
+    # Convertir fecha YYYY-MM-DD → DD/MM/YYYY si es necesario
+    if len(fecha) == 10 and fecha[4] == '-':
+        fecha = f"{fecha[8:10]}/{fecha[5:7]}/{fecha[:4]}"
+
+    url     = _API_URL.format(phone_number_id=cfg.phone_number_id)
+    headers = {"Authorization": f"Bearer {cfg.token}", "Content-Type": "application/json"}
+
+    enviados = 0
+    errores  = []
+    for d in destinatarios:
+        payload = {
+            "messaging_product": "whatsapp",
+            "to":   d.numero,
+            "type": "template",
+            "template": {
+                "name":     _TEMPLATE_FORMATO_DIARIO,
+                "language": {"code": _TEMPLATE_FORMATO_DIARIO_LANG},
+                "components": [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type":     "document",
+                                "document": {"id": media_id, "filename": filename},
+                            }
+                        ],
+                    },
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": tienda_nombre},
+                            {"type": "text", "text": fecha},
+                        ],
+                    },
+                ],
+            },
+        }
+        try:
+            r = requests.post(url, json=payload, headers=headers, timeout=10)
+            if not r.ok:
+                logger.error("WA foto_registro error %s a %s: %s", r.status_code, d.numero, r.text)
+                errores.append(f"{d.numero}: {r.text[:80]}")
+            else:
+                logger.info("WA foto_registro_diario enviado a %s", d.numero)
                 enviados += 1
         except Exception as exc:
             errores.append(f"{d.numero}: {exc}")

@@ -793,6 +793,48 @@ class DashboardCajaView(APIView):
         })
 
 
+# ── Enviar Formato de Movimiento Diario por WhatsApp ─────────
+class EnviarFormatoDiarioWhatsAppView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        filtro = {"pk": pk}
+        if not es_superadmin(request):
+            filtro["tienda__empresa"] = get_empresa(request)
+        if request.user.rol == "cajero":
+            filtro["tienda_id"] = request.user.tienda_id
+
+        try:
+            sesion = SesionCaja.objects.select_related("tienda").get(**filtro)
+        except SesionCaja.DoesNotExist:
+            return Response({"error": "Sesión no encontrada."}, status=404)
+
+        pdf_file = request.FILES.get("pdf")
+        if not pdf_file:
+            return Response({"error": "Falta el archivo PDF."}, status=400)
+
+        pdf_bytes = pdf_file.read()
+        fecha     = sesion.fecha_cierre.strftime("%Y-%m-%d") if sesion.fecha_cierre else sesion.fecha_apertura.strftime("%Y-%m-%d")
+        filename  = f"REGISTRO_{sesion.id}_{fecha}_{sesion.tienda.nombre.replace(' ', '_')}.pdf"
+
+        from configuracion.whatsapp_service import enviar_foto_registro_diario
+
+        resultado = enviar_foto_registro_diario(
+            empresa_id=sesion.tienda.empresa_id,
+            tienda_id=sesion.tienda_id,
+            pdf_bytes=pdf_bytes,
+            filename=filename,
+            tienda_nombre=sesion.tienda.nombre,
+            fecha=fecha,
+        )
+
+        return Response({
+            "success":  resultado["enviados"] > 0,
+            "enviados": resultado["enviados"],
+            "errores":  resultado["errores"],
+        })
+
+
 # ── Enviar PDF de cierre por WhatsApp ────────────────────────
 class EnviarPdfWhatsAppView(APIView):
     permission_classes = [IsAuthenticated]
@@ -820,7 +862,7 @@ class EnviarPdfWhatsAppView(APIView):
 
         from configuracion.whatsapp_service import (
             enviar_pdf_cierre_template,
-            enviar_registro_movimiento_diario,
+            enviar_cierre_turno_v3,
         )
 
         # 1 — PDF
@@ -833,7 +875,7 @@ class EnviarPdfWhatsAppView(APIView):
             fecha=fecha,
         )
 
-        # 2 — Texto: Registro de Movimiento Diario
+        # 2 — Texto: Cierre de Turno v3
         try:
             base_v = Venta.objects.filter(sesion_caja=sesion, estado="completada")
             _v_ef  = base_v.filter(metodo_pago="efectivo").aggregate(t=Sum("total"))["t"] or Decimal("0")
@@ -863,9 +905,24 @@ class EnviarPdfWhatsAppView(APIView):
             _abonos_ef  = _Mov.objects.filter(sesion=sesion, tipo="abono_separado", metodo_pago="efectivo").aggregate(t=Sum("monto"))["t"] or Decimal("0")
             _abonos_tot = _Mov.objects.filter(sesion=sesion, tipo="abono_separado").aggregate(t=Sum("monto"))["t"] or Decimal("0")
             _abonos_n   = _Mov.objects.filter(sesion=sesion, tipo="abono_separado").count()
-            _dev_neto   = float(sesion.devoluciones_efectivo or 0)
 
-            enviar_registro_movimiento_diario(
+            # Bonos redimidos en ventas de este turno
+            _bono_puro   = base_v.filter(metodo_pago="bono").aggregate(t=Sum("total"))["t"] or Decimal("0")
+            _bono_ef_qs  = base_v.filter(metodo_pago="bono_efectivo")
+            _bono_tar_qs = base_v.filter(metodo_pago="bono_tarjeta")
+            _bono_tra_qs = base_v.filter(metodo_pago="bono_transferencia")
+            _bono_mix_ef  = PagoVenta.objects.filter(venta__in=_bono_ef_qs,  metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _bono_mix_tar = PagoVenta.objects.filter(venta__in=_bono_tar_qs, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _bono_mix_tra = PagoVenta.objects.filter(venta__in=_bono_tra_qs, metodo="bono").aggregate(t=Sum("monto"))["t"] or Decimal("0")
+            _bono_redim_total = _bono_puro + _bono_mix_ef + _bono_mix_tar + _bono_mix_tra
+
+            # Bonos creados/vendidos en este turno
+            from bonos.models import Bono as _Bono
+            _bono_compra = _Bono.objects.filter(
+                venta_origen__sesion_caja=sesion
+            ).aggregate(t=Sum("valor_original"))["t"] or Decimal("0")
+
+            enviar_cierre_turno_v3(
                 empresa_id=sesion.tienda.empresa_id,
                 tienda_id=sesion.tienda_id,
                 datos={
@@ -873,6 +930,9 @@ class EnviarPdfWhatsAppView(APIView):
                     "colaborador_nombre": _nombre_emp,
                     "fecha_cierre":       _fecha_str,
                     "monto_inicial":      float(sesion.monto_inicial),
+                    "monto_contado":      float(sesion.monto_final_real or 0),
+                    "monto_esperado":     float(sesion.monto_final_sistema or 0),
+                    "diferencia":         float(sesion.diferencia or 0),
                     "ventas": {
                         "total":             float(_v_ef + _v_tar + _v_tra + _v_mix),
                         "efectivo":          float(_v_ef),
@@ -886,14 +946,16 @@ class EnviarPdfWhatsAppView(APIView):
                         "efectivo": float(_abonos_ef),
                         "cantidad": _abonos_n,
                     },
-                    "devoluciones_neto_ef": _dev_neto,
-                    "total_gastos":         float(_gastos_total),
-                    "monto_esperado":       float(sesion.monto_final_sistema or 0),
+                    "bonos": {
+                        "redimidos": float(_bono_redim_total),
+                        "compra":    float(_bono_compra),
+                    },
+                    "total_gastos": float(_gastos_total),
                 },
             )
         except Exception as _exc:
             import logging as _log
-            _log.getLogger(__name__).error("WA registro movimiento error: %s", _exc)
+            _log.getLogger(__name__).error("WA cierre_turno_v3 error: %s", _exc)
 
         return Response({
             "success":  resultado["enviados"] > 0,

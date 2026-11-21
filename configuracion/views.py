@@ -306,6 +306,7 @@ class AppVersionView(APIView):
     # Actualiza estos valores al publicar una nueva versión
     LATEST_VERSION = "1.5.7"
     DOWNLOAD_URL   = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.5.7/POS_Multitienda_Setup.exe"
+    APK_URL        = "https://github.com/carlosalevela/pos_multitienda_front/releases/download/v1.5.7/app-release.apk"
 
     def get(self, request):
         client_version = request.query_params.get('v', 'desconocida')
@@ -320,5 +321,6 @@ class AppVersionView(APIView):
         return Response({
             "version":      self.LATEST_VERSION,
             "download_url": self.DOWNLOAD_URL,
+            "apk_url":      self.APK_URL,
             "obligatoria":  False,
         })
